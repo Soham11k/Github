@@ -1,0 +1,33 @@
+# Secrets / local env
+.env
+**/.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Runtime / editor
+.run/
+.idea/
+.vscode/
+.qodo/
+*.log
+.DS_Store
+
+# macOS USB / AppleDouble junk
+._*
+**/._*
+.venv
+.venv/
+._*
+**/._*
+.qodo/
