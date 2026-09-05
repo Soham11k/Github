@@ -118,6 +118,15 @@ class GitHubClient:
     def get_org(self, org: str) -> Optional[dict]:
         return self.get(f"/orgs/{org}")
 
+    def get_authenticated_user(self) -> Optional[dict]:
+        """Return /user payload when token is valid; None if missing/invalid."""
+        if not self.token or not str(self.token).strip():
+            return None
+        try:
+            return self.get("/user")
+        except Exception:
+            return None
+
 
 DEFAULT_SEED_REPOS = [
     "facebook/react",

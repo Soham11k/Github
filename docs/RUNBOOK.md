@@ -10,11 +10,13 @@
 ## Fast path
 
 ```bash
-./scripts/start.sh    # DB + API :8000 + UI :5173 (seeds if empty)
+# Set GITHUB_TOKEN in .env first for real GitHub data
+./scripts/start.sh       # empty DB + token → live ingest; else SQL seed fallback
+./scripts/sync_github.sh # re-sync anytime
 ./scripts/stop.sh
 ```
 
-UI ingest: http://127.0.0.1:5173/ingest (admin token default `changeme`; set `GITHUB_TOKEN` in `.env` for reliable live sync).
+UI ingest: http://127.0.0.1:5173/ingest (admin token default `changeme`; status shows token OK + login).
 
 Full Docker stack: `docker compose up --build` → UI http://localhost:8080
 

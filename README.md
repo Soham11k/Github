@@ -30,23 +30,33 @@ GitHub REST API → Python ingest (transactions)
 
 ```bash
 cp .env.example .env   # first time only
-# optional: set GITHUB_TOKEN=ghp_… for live GitHub ingest
+# set GITHUB_TOKEN=ghp_…  (required for real GitHub data on first start)
 
-chmod +x scripts/start.sh scripts/stop.sh
+chmod +x scripts/*.sh
 ./scripts/start.sh
 ```
+
+When `GITHUB_TOKEN` is set and the DB is empty, `start.sh` **live-ingests** well-known repos from the GitHub API (not SQL demo rows). Without a token, it falls back to offline `sql/seed_demo.sql`.
 
 Opens:
 
 | URL | What |
 |---|---|
-| http://127.0.0.1:5173/ | UI (Explore + seeded data) |
+| http://127.0.0.1:5173/ | UI (Explore + live or seed data) |
 | http://127.0.0.1:5173/ingest | Live ingest form |
 | http://127.0.0.1:8000/docs | API docs |
 
 Stop with `./scripts/stop.sh`.
 
-`start.sh` ensures Postgres (local Homebrew or Compose `db`), applies SQL, seeds if the DB is empty, then starts API + UI.
+### Re-sync real GitHub data
+
+```bash
+./scripts/sync_github.sh                 # built-in seed list, limit 12
+LIMIT=20 ./scripts/sync_github.sh
+REPOS="pallets/flask facebook/react" ./scripts/sync_github.sh
+QUERY="stars:>30000 language:python" LIMIT=10 ./scripts/sync_github.sh
+./scripts/sync_github.sh --repo torvalds/linux --limit 1 --no-seed
+```
 
 ### Option B — full Docker Compose (portable)
 
@@ -62,15 +72,16 @@ docker compose up --build
 | http://localhost:8080/ | UI (nginx → API) |
 | http://localhost:8000/docs | API |
 
-First DB boot loads schema + demo seed automatically.
+First DB boot loads schema + demo seed automatically. For live data in Compose, run ingest via the API/UI or exec into `api` and use `python -m app.ingest --seed`.
 
-### Live ingest
+### Live ingest (UI)
 
-1. Set `GITHUB_TOKEN` in `.env` and restart (`./scripts/stop.sh && ./scripts/start.sh`, or recreate the `api` container).
-2. Open **Ingest**, enter admin token (default `changeme`), keep seed or add `owner/repo` lines, run sync.
-3. Explore / Insights update from Postgres.
+1. Set `GITHUB_TOKEN` in `.env` and restart (`./scripts/stop.sh && ./scripts/start.sh`).
+2. Open **Ingest** — status should show token OK + your GitHub login.
+3. Keep seed list and/or add `owner/repo` lines, admin token `changeme`, run sync.
+4. Explore / Insights update from Postgres.
 
-Without a token, offline **seed** data still works; live API sync will be rate-limited or fail.
+Without a token, offline **SQL seed** still works on empty DB; live API sync will be rate-limited or fail.
 
 ### Manual / legacy steps
 
@@ -102,12 +113,12 @@ API docs: http://localhost:8000/docs
 
 ### 5-minute demo script
 
-1. `./scripts/start.sh` (seeded Explore loads automatically)
+1. `./scripts/start.sh` (with `GITHUB_TOKEN` set → live GitHub data on empty DB)
 2. SQL: `psql … -f sql/demo_queries.sql` (joins, windows, recursive CTE, procedures, EXPLAIN)
 3. UI Explore → pick a healthy repo → Insights tab (factors + monthly MoM)
 4. Repositories → select 2–3 → Compare radar
 5. Organizations → drill into an org; toggle light/dark
-6. Optional: Ingest → sync `pallets/flask` with `GITHUB_TOKEN` set
+6. Optional: `./scripts/sync_github.sh` or Ingest UI for more repos
 
 ## Project layout
 
@@ -117,8 +128,9 @@ backend/             FastAPI app + GitHub ingest CLI (+ Dockerfile)
 frontend/            React (Vite) + Primer + Chart.js (+ Dockerfile / nginx)
 docs/                Course / evaluation documentation
 docker-compose.yml   Postgres + API + web (full stack)
-scripts/start.sh     one-command local stack
+scripts/start.sh     one-command local stack (live ingest when token + empty DB)
 scripts/stop.sh      stop API/UI from start.sh
+scripts/sync_github.sh  re-sync real GitHub data into Postgres
 scripts/apply_sql.sh re-apply SQL (`--with-seed` loads demo data)
 ```
 

@@ -36,8 +36,10 @@ export default function Ingest() {
   )
   const [useSeed, setUseSeed] = useState(true)
   const [query, setQuery] = useState('')
-  const [reposText, setReposText] = useState('pallets/flask\npallets/click')
-  const [limit, setLimit] = useState(10)
+  const [reposText, setReposText] = useState(
+    'facebook/react\nmicrosoft/vscode\npallets/flask\nfastapi/fastapi',
+  )
+  const [limit, setLimit] = useState(12)
 
   const refresh = useCallback(async () => {
     const [st, sync] = await Promise.all([api.ingestStatus(), api.syncRuns(10)])
@@ -67,14 +69,13 @@ export default function Ingest() {
         .filter(Boolean)
       const body = {
         use_seed: useSeed,
-        limit: Number(limit) || 10,
+        limit: Number(limit) || 12,
         query: query.trim() || null,
         repos: repos.length ? repos : null,
       }
       const res = await api.ingest(body, adminToken)
       setResult(res)
       await refresh()
-      // Poll a few times for latest sync history
       for (let i = 0; i < 4; i += 1) {
         await new Promise((r) => setTimeout(r, 1500))
         await refresh()
@@ -96,22 +97,35 @@ export default function Ingest() {
           Ingest
         </Heading>
         <Text as="p" className="muted" sx={{ mt: 1, mb: 0 }}>
-          Pull public GitHub data into Postgres. Requires admin token; live sync needs{' '}
-          <code>GITHUB_TOKEN</code> in <code>.env</code>.
+          Pull real public GitHub data into Postgres. Set <code>GITHUB_TOKEN</code> in{' '}
+          <code>.env</code>, then run ingest here or <code>./scripts/sync_github.sh</code>.
         </Text>
       </div>
 
       {status && !status.github_token_configured && (
         <div className="banner-warn" role="status">
-          No GitHub token configured. Offline seed mode still works; live API sync will be
-          rate-limited or fail. Set <code>GITHUB_TOKEN</code> in the project <code>.env</code> and
-          restart the API.
+          No GitHub token configured. Live sync will be rate-limited or fail. Set{' '}
+          <code>GITHUB_TOKEN</code> in the project <code>.env</code> and restart the API.
         </div>
       )}
 
-      {status?.github_token_configured && (
+      {status?.github_token_configured && status.token_valid && (
         <div className="banner-ok" role="status">
-          GitHub token is configured. Live ingest is available.
+          GitHub token OK
+          {status.authenticated_login ? (
+            <>
+              {' '}
+              (authenticated as <strong>{status.authenticated_login}</strong>)
+            </>
+          ) : null}
+          . Live ingest is available.
+        </div>
+      )}
+
+      {status?.github_token_configured && !status.token_valid && (
+        <div className="banner-warn" role="status">
+          GitHub token is set but invalid or expired. Update <code>GITHUB_TOKEN</code> in{' '}
+          <code>.env</code> and restart the API.
         </div>
       )}
 
@@ -133,7 +147,7 @@ export default function Ingest() {
 
         <FormControl>
           <Checkbox checked={useSeed} onChange={(e) => setUseSeed(e.target.checked)} />
-          <FormControl.Label>Include built-in seed repo list</FormControl.Label>
+          <FormControl.Label>Include built-in well-known repo list (live from GitHub)</FormControl.Label>
         </FormControl>
 
         <FormControl>

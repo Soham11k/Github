@@ -346,8 +346,21 @@ def ingest_status() -> dict[str, Any]:
         LIMIT 1
         """
     )
+    token_configured = bool(settings.github_token and settings.github_token.strip())
+    authenticated_login: Optional[str] = None
+    token_valid = False
+    if token_configured:
+        from app.services.github_client import GitHubClient
+
+        with GitHubClient() as client:
+            user = client.get_authenticated_user()
+            if user and user.get("login"):
+                authenticated_login = str(user["login"])
+                token_valid = True
     return {
-        "github_token_configured": bool(settings.github_token and settings.github_token.strip()),
+        "github_token_configured": token_configured,
+        "token_valid": token_valid,
+        "authenticated_login": authenticated_login,
         "last_sync": last,
     }
 

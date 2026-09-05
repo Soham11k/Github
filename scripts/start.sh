@@ -12,10 +12,9 @@ if [[ ! -f "$ROOT/.env" ]]; then
   echo "Created .env from .env.example — set GITHUB_TOKEN for live ingest."
 fi
 
-set -a
 # shellcheck disable=SC1091
-source <(sed 's/\r$//' "$ROOT/.env" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true)
-set +a
+source "$ROOT/scripts/load_env.sh"
+load_dotenv "$ROOT/.env"
 
 DATABASE_URL="${DATABASE_URL:-postgresql://osint:osint@localhost:5432/github_osint}"
 export DATABASE_URL
@@ -61,13 +60,6 @@ for f in schema indexes triggers views procedures grants; do
 done
 psql "$DATABASE_URL" -c "SELECT 1" >/dev/null 2>&1 || true
 
-REPO_COUNT="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
-if [[ "${REPO_COUNT:-0}" -eq 0 ]]; then
-  echo "==> Empty database — loading demo seed…"
-  psql -h localhost -d github_osint -v ON_ERROR_STOP=1 -f "$ROOT/sql/seed_demo.sql" >/dev/null
-fi
-psql -h localhost -d github_osint -f "$ROOT/sql/grants.sql" >/dev/null 2>&1 || true
-
 echo "==> Backend venv…"
 if command -v python3.12 >/dev/null 2>&1; then PY=python3.12; else PY=python3; fi
 VENV_DIR="/tmp/github-osint-venv"
@@ -76,6 +68,38 @@ if [[ ! -x "$VENV_DIR/bin/uvicorn" ]]; then
   "$VENV_DIR/bin/pip" install -q -r "$ROOT/backend/requirements.txt"
 fi
 ln -sfn "$VENV_DIR" "$ROOT/backend/.venv"
+
+REPO_COUNT="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
+if [[ "${REPO_COUNT:-0}" -eq 0 ]]; then
+  TOKEN_TRIMMED="$(echo -n "${GITHUB_TOKEN:-}" | tr -d '[:space:]')"
+  if [[ -n "$TOKEN_TRIMMED" ]]; then
+    echo "==> Empty database — live ingest from GitHub (seed list, limit 12)…"
+    INGEST_OUT="$RUN_DIR/bootstrap_ingest.json"
+    set +e
+    (
+      cd "$ROOT/backend"
+      "$VENV_DIR/bin/python" -m app.ingest --seed --limit 12
+    ) >"$INGEST_OUT" 2>"$RUN_DIR/bootstrap_ingest.log"
+    INGEST_RC=$?
+    set -e
+    if [[ -f "$INGEST_OUT" ]]; then
+      echo "    Ingest result:"
+      cat "$INGEST_OUT" || true
+    fi
+    SYNCED="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
+    if [[ "$INGEST_RC" -ne 0 || "${SYNCED:-0}" -eq 0 ]]; then
+      echo "ERROR: Live GitHub ingest failed or synced 0 repos."
+      echo "       Check GITHUB_TOKEN in .env (expired/invalid?) and $RUN_DIR/bootstrap_ingest.log"
+      tail -40 "$RUN_DIR/bootstrap_ingest.log" || true
+      exit 1
+    fi
+    echo "    Synced $SYNCED repositories from GitHub."
+  else
+    echo "==> Empty database — no GITHUB_TOKEN; loading offline demo seed…"
+    psql -h localhost -d github_osint -v ON_ERROR_STOP=1 -f "$ROOT/sql/seed_demo.sql" >/dev/null
+  fi
+fi
+psql -h localhost -d github_osint -f "$ROOT/sql/grants.sql" >/dev/null 2>&1 || true
 
 echo "==> Frontend deps…"
 if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
