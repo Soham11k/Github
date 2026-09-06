@@ -213,6 +213,10 @@ export default function RepoDetail() {
                         <div className="muted">
                           #{p.number} · {p.is_merged ? 'merged' : p.state}
                           {p.merged_at ? ` · ${relativeTime(p.merged_at)}` : ''}
+                          {' · '}
+                          {p.additions == null && p.deletions == null
+                            ? 'churn n/a'
+                            : `+${p.additions ?? 0} / −${p.deletions ?? 0}`}
                         </div>
                       </div>
                     </li>

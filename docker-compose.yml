@@ -6,8 +6,10 @@ services:
       POSTGRES_USER: osint
       POSTGRES_PASSWORD: osint
       POSTGRES_DB: github_osint
-    ports:
-      - "5432:5432"
+    # DB is internal-only by default (safer for shared demos).
+    # To reach from host psql, uncomment:
+    # ports:
+    #   - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
@@ -16,7 +18,9 @@ services:
       - ./sql/views.sql:/docker-entrypoint-initdb.d/04_views.sql:ro
       - ./sql/procedures.sql:/docker-entrypoint-initdb.d/05_procedures.sql:ro
       - ./sql/grants.sql:/docker-entrypoint-initdb.d/06_grants.sql:ro
-      - ./sql/seed_demo.sql:/docker-entrypoint-initdb.d/07_seed.sql:ro
+      # Demo SQL seed is optional — leave commented so API bootstrap can live-ingest
+      # when GITHUB_TOKEN is set. Uncomment for offline demos without a token:
+      # - ./sql/seed_demo.sql:/docker-entrypoint-initdb.d/07_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U osint -d github_osint"]
       interval: 5s
@@ -31,6 +35,7 @@ services:
       DATABASE_URL: postgresql://osint:osint@db:5432/github_osint
       CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Local demo only — change ADMIN_TOKEN for any shared deploy
       ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme}
     ports:
       - "8000:8000"

@@ -22,6 +22,7 @@ export function EmptyState({
   title = 'Nothing here yet',
   description = 'Ingest repositories or load the demo seed to populate this view.',
   icon: Icon = RepoIcon,
+  action = null,
 }) {
   return (
     <div className="empty-slate">
@@ -30,6 +31,7 @@ export function EmptyState({
       </div>
       <Heading as="h3" className="h3">{title}</Heading>
       <Text as="p" className="muted">{description}</Text>
+      {action}
     </div>
   )
 }

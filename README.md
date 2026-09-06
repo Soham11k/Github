@@ -62,7 +62,7 @@ QUERY="stars:>30000 language:python" LIMIT=10 ./scripts/sync_github.sh
 
 ```bash
 cp .env.example .env
-# set GITHUB_TOKEN and ADMIN_TOKEN in .env
+# set GITHUB_TOKEN (recommended) and change ADMIN_TOKEN for any shared demo
 
 docker compose up --build
 ```
@@ -72,7 +72,11 @@ docker compose up --build
 | http://localhost:8080/ | UI (nginx → API) |
 | http://localhost:8000/docs | API |
 
-First DB boot loads schema + demo seed automatically. For live data in Compose, run ingest via the API/UI or exec into `api` and use `python -m app.ingest --seed`.
+First DB boot loads schema + offline SQL seed. If `GITHUB_TOKEN` is set and the DB still has **0** repos when `api` starts, the container **live-ingests** the seed list (limit 8) before serving.
+
+Postgres is **not** published on host `:5432` by default (internal Docker network only). To expose it for host `psql`, uncomment the `ports` block under `db` in `docker-compose.yml`.
+
+**Local-only credentials:** `osint` / `osint`, `ADMIN_TOKEN=changeme`, and `osint_ro` / `osint_ro` (read-only). Change before any shared deploy.
 
 ### Live ingest (UI)
 
@@ -149,9 +153,9 @@ scripts/apply_sql.sh re-apply SQL (`--with-seed` loads demo data)
 
 ### Health score (`sp_refresh_health_scores`)
 
-Weighted 0–100 composite from:
+Weighted 0–100 composite from sampled commits/issues/PRs **plus** GitHub `pushed_at` floors so mega-repos are not falsely marked abandoned (see [docs/HEALTH_SCORE.md](docs/HEALTH_SCORE.md)):
 
-- Commit velocity (90 days)
+- Commit velocity (90d sample, or recent-push floor)
 - Unique contributors
 - Issue close rate + median days-to-close
 - PR merge rate
@@ -167,7 +171,8 @@ Weighted 0–100 composite from:
 - `GET /api/languages` — popularity
 - `GET /api/beginner-friendly` / `GET /api/inactive`
 - `GET /api/ingest/status` — whether `GITHUB_TOKEN` is set + last sync (never returns the token)
-- `POST /api/ingest` — header `X-Admin-Token: <ADMIN_TOKEN>` (also available from UI `/ingest`)
+- `POST /api/ingest` — starts background sync; header `X-Admin-Token`; poll `GET /api/sync-runs/{id}`
+- `GET /api/sync-runs` / `GET /api/sync-runs/{id}` — sync history and live progress
 
 ### Sample ingest
 

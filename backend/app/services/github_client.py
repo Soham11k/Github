@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -28,6 +29,8 @@ class GitHubClient:
             timeout=60.0,
             follow_redirects=True,
         )
+        self.last_rate_limit_remaining: Optional[int] = None
+        self.last_rate_limit_reset: Optional[str] = None
 
     def close(self) -> None:
         self._client.close()
@@ -38,13 +41,59 @@ class GitHubClient:
     def __exit__(self, *args: Any) -> None:
         self.close()
 
+    def _capture_rate_headers(self, response: httpx.Response) -> None:
+        remaining = response.headers.get("X-RateLimit-Remaining")
+        reset = response.headers.get("X-RateLimit-Reset")
+        if remaining is not None:
+            try:
+                self.last_rate_limit_remaining = int(remaining)
+            except ValueError:
+                pass
+        if reset is not None:
+            try:
+                ts = int(reset)
+                self.last_rate_limit_reset = datetime.fromtimestamp(
+                    ts, tz=timezone.utc
+                ).isoformat()
+            except ValueError:
+                self.last_rate_limit_reset = reset
+
+    def _wait_for_rate_limit(self, response: httpx.Response) -> None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait = int(retry_after)
+            except ValueError:
+                wait = 60
+        else:
+            reset = response.headers.get("X-RateLimit-Reset")
+            if reset:
+                try:
+                    wait = max(int(reset) - int(time.time()), 5)
+                except ValueError:
+                    wait = 60
+            else:
+                wait = 60
+        time.sleep(min(wait, 120))
+
+    def _is_rate_limited(self, response: httpx.Response) -> bool:
+        if response.status_code == 429:
+            return True
+        if response.status_code != 403:
+            return False
+        body = (response.text or "").lower()
+        return (
+            "rate limit" in body
+            or "secondary rate" in body
+            or "abuse detection" in body
+        )
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         for attempt in range(5):
             response = self._client.request(method, path, **kwargs)
-            if response.status_code == 403 and "rate limit" in response.text.lower():
-                reset = response.headers.get("X-RateLimit-Reset")
-                wait = max(int(reset) - int(time.time()), 5) if reset else 60
-                time.sleep(min(wait, 120))
+            self._capture_rate_headers(response)
+            if self._is_rate_limited(response):
+                self._wait_for_rate_limit(response)
                 continue
             if response.status_code == 404:
                 return None
@@ -61,6 +110,36 @@ class GitHubClient:
 
     def get(self, path: str, params: Optional[dict] = None) -> Any:
         return self._request("GET", path, params=params)
+
+    def get_rate_limit(self) -> dict[str, Any]:
+        """Return core rate-limit snapshot from /rate_limit."""
+        try:
+            data = self.get("/rate_limit")
+            if not data:
+                return {
+                    "rate_limit_remaining": self.last_rate_limit_remaining,
+                    "rate_limit_reset": self.last_rate_limit_reset,
+                }
+            core = (data.get("resources") or {}).get("core") or data.get("rate") or {}
+            remaining = core.get("remaining")
+            reset = core.get("reset")
+            reset_iso = None
+            if reset is not None:
+                try:
+                    reset_iso = datetime.fromtimestamp(int(reset), tz=timezone.utc).isoformat()
+                except (TypeError, ValueError):
+                    reset_iso = str(reset)
+            return {
+                "rate_limit_remaining": remaining,
+                "rate_limit_reset": reset_iso,
+                "rate_limit_limit": core.get("limit"),
+                "rate_limit_used": core.get("used"),
+            }
+        except Exception:
+            return {
+                "rate_limit_remaining": self.last_rate_limit_remaining,
+                "rate_limit_reset": self.last_rate_limit_reset,
+            }
 
     def search_repositories(self, query: str, limit: int = 30) -> list[dict]:
         results: list[dict] = []
@@ -82,6 +161,13 @@ class GitHubClient:
     def get_repo(self, owner: str, repo: str) -> Optional[dict]:
         return self.get(f"/repos/{owner}/{repo}")
 
+    def get_forks(self, owner: str, repo: str, limit: int = 5) -> list[dict]:
+        data = self.get(
+            f"/repos/{owner}/{repo}/forks",
+            params={"per_page": min(limit, 30), "sort": "stargazers"},
+        )
+        return (data or [])[:limit]
+
     def get_contributors(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
         data = self.get(
             f"/repos/{owner}/{repo}/contributors",
@@ -97,10 +183,23 @@ class GitHubClient:
         return data or []
 
     def get_issues(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
-        # state=all includes closed; filter PRs via pull_request key
         data = self.get(
             f"/repos/{owner}/{repo}/issues",
             params={"state": "all", "per_page": min(limit, 100)},
+        )
+        return data or []
+
+    def get_labeled_issues(
+        self, owner: str, repo: str, label: str, limit: int = 30
+    ) -> list[dict]:
+        """Fetch open issues with a specific label (e.g. good first issue)."""
+        data = self.get(
+            f"/repos/{owner}/{repo}/issues",
+            params={
+                "state": "open",
+                "labels": label,
+                "per_page": min(limit, 100),
+            },
         )
         return data or []
 
@@ -129,9 +228,11 @@ class GitHubClient:
 
 
 DEFAULT_SEED_REPOS = [
+    "firstcontributions/first-contributions",
+    "scikit-learn/scikit-learn",
+    "microsoft/TypeScript",
     "facebook/react",
     "microsoft/vscode",
-    "torvalds/linux",
     "vercel/next.js",
     "django/django",
     "pallets/flask",
@@ -144,4 +245,17 @@ DEFAULT_SEED_REPOS = [
     "rust-lang/rust",
     "golang/go",
     "angular/angular",
+    "mui/material-ui",
+    "home-assistant/core",
+    "twbs/bootstrap",
+    "jupyter/notebook",
+    "pandas-dev/pandas",
+    "numpy/numpy",
+    "prettier/prettier",
+    "eslint/eslint",
+    "webpack/webpack",
+    "redis/redis",
+    "postgres/postgres",
+    "git/git",
+    "ohmyzsh/ohmyzsh",
 ]

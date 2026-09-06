@@ -57,9 +57,22 @@ export default function Explore() {
 
   if (loading) return <LoadingState label="Loading Explore…" />
   if (error) return <ErrorState message={error} />
-  if (!data) return <EmptyState title="No marketplace data yet" />
+  if (!data) {
+    return (
+      <EmptyState
+        title="No marketplace data yet"
+        description="Pull real GitHub repos to fill Explore, Insights, and rankings."
+        action={
+          <Button as={RouterLink} to="/ingest" variant="primary" sx={{ mt: 2 }}>
+            Go to Ingest
+          </Button>
+        }
+      />
+    )
+  }
 
   const { kpis, languages, top_repos: topRepos, top_orgs: topOrgs, recent_syncs: recentSyncs } = data
+  const emptyMarket = !kpis?.repo_count
 
   return (
     <div className="page">
@@ -82,6 +95,11 @@ export default function Explore() {
             <Button as={RouterLink} to="/beginner">
               Find good first issues
             </Button>
+            {emptyMarket && (
+              <Button as={RouterLink} to="/ingest" leadingVisual={SyncIcon}>
+                Ingest GitHub data
+              </Button>
+            )}
           </div>
         </div>
         <div className="explore-hero-panel">
@@ -115,9 +133,16 @@ export default function Explore() {
               <RepoListItem key={r.repo_id} repo={r} />
             ))}
             {!topRepos?.length && (
-              <EmptyState title="No trending repos" description="Run an ingest to populate Explore." />
-            )}
-          </div>
+              <EmptyState
+                title="No trending repos"
+                description="Run a live ingest to populate Explore from GitHub."
+                action={
+                  <Button as={RouterLink} to="/ingest" variant="primary" sx={{ mt: 2 }} leadingVisual={SyncIcon}>
+                    Open Ingest
+                  </Button>
+                }
+              />
+            )}          </div>
         </section>
 
         <aside className="explore-side">

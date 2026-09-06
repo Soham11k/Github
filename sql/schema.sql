@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS repositories (
     health_score        NUMERIC(5, 2) NOT NULL DEFAULT 0,
     commit_count_cache  INTEGER NOT NULL DEFAULT 0,
     contributor_count_cache INTEGER NOT NULL DEFAULT 0,
+    -- 'full' = live ingest; 'stub' = lightweight fork/parent row for tree demos only
+    sync_depth          VARCHAR(16) NOT NULL DEFAULT 'full',
     synced_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_repo_owner_name UNIQUE (owner_login, name)
 );
@@ -116,9 +118,9 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     updated_at          TIMESTAMPTZ,
     closed_at           TIMESTAMPTZ,
     merged_at           TIMESTAMPTZ,
-    additions           INTEGER NOT NULL DEFAULT 0,
-    deletions           INTEGER NOT NULL DEFAULT 0,
-    changed_files       INTEGER NOT NULL DEFAULT 0,
+    additions           INTEGER,
+    deletions           INTEGER,
+    changed_files       INTEGER,
     html_url            TEXT,
     CONSTRAINT uq_pr_repo_number UNIQUE (repo_id, number)
 );
@@ -130,8 +132,19 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     status          VARCHAR(32) NOT NULL DEFAULT 'running',
     query_used      TEXT,
     repos_synced    INTEGER NOT NULL DEFAULT 0,
+    repos_requested INTEGER NOT NULL DEFAULT 0,
     error_message   TEXT
 );
+
+-- Idempotent upgrades for existing local databases
+ALTER TABLE pull_requests ALTER COLUMN additions DROP NOT NULL;
+ALTER TABLE pull_requests ALTER COLUMN deletions DROP NOT NULL;
+ALTER TABLE pull_requests ALTER COLUMN changed_files DROP NOT NULL;
+ALTER TABLE pull_requests ALTER COLUMN additions DROP DEFAULT;
+ALTER TABLE pull_requests ALTER COLUMN deletions DROP DEFAULT;
+ALTER TABLE pull_requests ALTER COLUMN changed_files DROP DEFAULT;
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS repos_requested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sync_depth VARCHAR(16) NOT NULL DEFAULT 'full';
 
 CREATE TABLE IF NOT EXISTS audit_log (
     audit_id        BIGSERIAL PRIMARY KEY,

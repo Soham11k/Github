@@ -4,6 +4,7 @@ import {
   Checkbox,
   FormControl,
   Heading,
+  ProgressBar,
   Text,
   Textarea,
   TextInput,
@@ -23,13 +24,18 @@ function formatTs(value) {
   }
 }
 
+function isActiveStatus(status) {
+  return status === 'queued' || status === 'running'
+}
+
 export default function Ingest() {
   const [status, setStatus] = useState(null)
   const [runs, setRuns] = useState([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [result, setResult] = useState(null)
+  const [activeSyncId, setActiveSyncId] = useState(null)
+  const [activeRun, setActiveRun] = useState(null)
 
   const [adminToken, setAdminToken] = useState(
     () => sessionStorage.getItem(TOKEN_KEY) || 'changeme',
@@ -37,7 +43,7 @@ export default function Ingest() {
   const [useSeed, setUseSeed] = useState(true)
   const [query, setQuery] = useState('')
   const [reposText, setReposText] = useState(
-    'facebook/react\nmicrosoft/vscode\npallets/flask\nfastapi/fastapi',
+    'firstcontributions/first-contributions\nscikit-learn/scikit-learn\nfacebook/react\npallets/flask',
   )
   const [limit, setLimit] = useState(12)
 
@@ -57,11 +63,40 @@ export default function Ingest() {
     sessionStorage.setItem(TOKEN_KEY, adminToken)
   }, [adminToken])
 
+  useEffect(() => {
+    if (!activeSyncId) return undefined
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const run = await api.syncRun(activeSyncId)
+        if (cancelled) return
+        setActiveRun(run)
+        await refresh()
+        if (!isActiveStatus(run.status)) {
+          setSubmitting(false)
+          setActiveSyncId(null)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || String(err))
+          setSubmitting(false)
+          setActiveSyncId(null)
+        }
+      }
+    }
+    poll()
+    const id = setInterval(poll, 1500)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [activeSyncId, refresh])
+
   async function onSubmit(e) {
     e.preventDefault()
     setSubmitting(true)
     setError('')
-    setResult(null)
+    setActiveRun(null)
     try {
       const repos = reposText
         .split('\n')
@@ -74,20 +109,25 @@ export default function Ingest() {
         repos: repos.length ? repos : null,
       }
       const res = await api.ingest(body, adminToken)
-      setResult(res)
-      await refresh()
-      for (let i = 0; i < 4; i += 1) {
-        await new Promise((r) => setTimeout(r, 1500))
-        await refresh()
-      }
+      setActiveSyncId(res.sync_id)
+      setActiveRun({
+        sync_id: res.sync_id,
+        status: res.status || 'queued',
+        repos_synced: 0,
+        repos_requested: res.repos_requested,
+      })
     } catch (err) {
       setError(err.message || String(err))
-    } finally {
       setSubmitting(false)
     }
   }
 
   if (loading) return <LoadingState label="Loading ingest status…" />
+
+  const requested = activeRun?.repos_requested || 0
+  const synced = activeRun?.repos_synced || 0
+  const progressPct =
+    requested > 0 ? Math.min(100, Math.round((synced / requested) * 100)) : submitting ? 5 : 0
 
   return (
     <div className="page-stack">
@@ -119,6 +159,16 @@ export default function Ingest() {
             </>
           ) : null}
           . Live ingest is available.
+          {status.rate_limit_remaining != null ? (
+            <>
+              {' '}
+              API quota: <strong>{status.rate_limit_remaining}</strong>
+              {status.rate_limit_limit != null ? ` / ${status.rate_limit_limit}` : ''} remaining
+              {status.rate_limit_reset
+                ? ` (resets ${formatTs(status.rate_limit_reset)})`
+                : ''}
+              .            </>
+          ) : null}
         </div>
       )}
 
@@ -129,7 +179,36 @@ export default function Ingest() {
         </div>
       )}
 
+      {(status?.rate_limit_remaining != null && status.rate_limit_remaining < 200) ||
+      status?.last_sync_had_rate_limit ? (
+        <div className="banner-warn" role="status">
+          {status.last_sync_had_rate_limit
+            ? 'Last sync hit GitHub rate limits. Wait for reset or reduce batch size.'
+            : `GitHub API quota is low (${status.rate_limit_remaining} remaining). Large ingests may pause or fail.`}
+        </div>
+      ) : null}
+
       {error && <ErrorState message={error} />}
+
+      {(submitting || activeRun) && (
+        <div className="panel">
+          <Heading as="h2" sx={{ fontSize: 2, mb: 2 }}>
+            Sync progress
+          </Heading>
+          <Text as="p" className="muted" sx={{ mb: 2 }}>
+            Status: <strong>{activeRun?.status || 'queued'}</strong>
+            {' · '}
+            {synced}/{requested || '…'} repos
+            {activeRun?.sync_id ? ` · sync #${activeRun.sync_id}` : ''}
+          </Text>
+          <ProgressBar progress={progressPct} barSize="default" aria-label="Ingest progress" />
+          {activeRun?.error_message && (
+            <pre className="code-block" style={{ marginTop: '0.75rem' }}>
+              {activeRun.error_message}
+            </pre>
+          )}
+        </div>
+      )}
 
       <form className="ingest-form" onSubmit={onSubmit}>
         <FormControl>
@@ -187,23 +266,17 @@ export default function Ingest() {
         </Button>
       </form>
 
-      {result && (
-        <div className="panel">
-          <Heading as="h2" sx={{ fontSize: 2, mb: 2 }}>
-            Last run result
-          </Heading>
-          <pre className="code-block">{JSON.stringify(result, null, 2)}</pre>
-        </div>
-      )}
-
       <div className="panel">
         <Heading as="h2" sx={{ fontSize: 2, mb: 2 }}>
           Recent sync runs
         </Heading>
         {status?.last_sync && (
           <Text as="p" className="muted" sx={{ mb: 2 }}>
-            Latest: {status.last_sync.status || '—'} · repos_synced{' '}
-            {status.last_sync.repos_synced ?? '—'} · {formatTs(status.last_sync.started_at)}
+            Latest: {status.last_sync.status || '—'} · {status.last_sync.repos_synced ?? '—'}
+            {status.last_sync.repos_requested != null
+              ? ` / ${status.last_sync.repos_requested}`
+              : ''}{' '}
+            repos · {formatTs(status.last_sync.started_at)}
           </Text>
         )}
         {!runs.length && <Text className="muted">No sync runs yet.</Text>}
@@ -223,7 +296,10 @@ export default function Ingest() {
                   <tr key={run.sync_id || run.started_at}>
                     <td>{formatTs(run.started_at)}</td>
                     <td>{run.status || '—'}</td>
-                    <td>{run.repos_synced ?? '—'}</td>
+                    <td>
+                      {run.repos_synced ?? '—'}
+                      {run.repos_requested != null ? ` / ${run.repos_requested}` : ''}
+                    </td>
                     <td className="muted">{run.error_message || '—'}</td>
                   </tr>
                 ))}

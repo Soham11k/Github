@@ -16,9 +16,20 @@
 ./scripts/stop.sh
 ```
 
-UI ingest: http://127.0.0.1:5173/ingest (admin token default `changeme`; status shows token OK + login).
+UI ingest: http://127.0.0.1:5173/ingest (admin token default `changeme` — **local demo only**; status shows token OK, login, and API quota).
 
-Full Docker stack: `docker compose up --build` → UI http://localhost:8080
+Full Docker stack: `docker compose up --build` → UI http://localhost:8080  
+(DB not published on host 5432 by default; API live-ingests when `GITHUB_TOKEN` set and tables empty.)
+
+## Credentials (course / local only)
+
+| Who | Creds | Access |
+|---|---|---|
+| App role | `osint` / `osint` | read/write |
+| Analyst | `osint_ro` / `osint_ro` | SELECT only |
+| Admin API | `ADMIN_TOKEN=changeme` | `X-Admin-Token` header |
+
+Do not reuse these defaults on a shared or internet-facing host.
 
 ## Database
 

@@ -90,13 +90,18 @@ def _upsert_parent_repo(cur: Any, client: GitHubClient, parent: Optional[dict]) 
         """
         INSERT INTO repositories (
             repo_id, owner_login, name, full_name, html_url, is_fork,
-            stars, forks_count, open_issues_count, synced_at
+            stars, forks_count, open_issues_count, sync_depth, synced_at
         )
         VALUES (
             %(repo_id)s, %(owner_login)s, %(name)s, %(full_name)s, %(html_url)s, TRUE,
-            %(stars)s, %(forks)s, %(open_issues)s, NOW()
+            %(stars)s, %(forks)s, %(open_issues)s, 'stub', NOW()
         )
-        ON CONFLICT (repo_id) DO NOTHING
+        ON CONFLICT (repo_id) DO UPDATE SET
+            sync_depth = CASE
+                WHEN repositories.sync_depth = 'full' THEN repositories.sync_depth
+                ELSE 'stub'
+            END,
+            synced_at = NOW()
         """,
         {
             "repo_id": parent["id"],
@@ -110,6 +115,105 @@ def _upsert_parent_repo(cur: Any, client: GitHubClient, parent: Optional[dict]) 
         },
     )
     return int(parent["id"])
+
+
+def _upsert_child_fork(cur: Any, fork: dict, parent_repo_id: int) -> Optional[int]:
+    """Lightweight child fork row so fn_repo_fork_tree has demo data."""
+    if not fork or not fork.get("id"):
+        return None
+    owner = fork.get("owner") or {}
+    cur.execute(
+        """
+        INSERT INTO repositories (
+            repo_id, owner_login, name, full_name, html_url, description,
+            language_primary, stars, forks_count, open_issues_count,
+            is_fork, parent_repo_id, sync_depth,
+            created_at, updated_at, pushed_at, synced_at
+        )
+        VALUES (
+            %(repo_id)s, %(owner_login)s, %(name)s, %(full_name)s, %(html_url)s, %(description)s,
+            %(language_primary)s, %(stars)s, %(forks)s, %(open_issues)s,
+            TRUE, %(parent_repo_id)s, 'stub',
+            %(created_at)s, %(updated_at)s, %(pushed_at)s, NOW()
+        )
+        ON CONFLICT (repo_id) DO UPDATE SET
+            parent_repo_id = COALESCE(EXCLUDED.parent_repo_id, repositories.parent_repo_id),
+            stars = EXCLUDED.stars,
+            forks_count = EXCLUDED.forks_count,
+            sync_depth = CASE
+                WHEN repositories.sync_depth = 'full' THEN repositories.sync_depth
+                ELSE 'stub'
+            END,
+            synced_at = NOW()
+        """,
+        {
+            "repo_id": fork["id"],
+            "owner_login": owner.get("login") or fork.get("full_name", "/").split("/")[0],
+            "name": fork.get("name") or fork.get("full_name", "/").split("/")[-1],
+            "full_name": fork.get("full_name"),
+            "html_url": fork.get("html_url"),
+            "description": fork.get("description"),
+            "language_primary": fork.get("language"),
+            "stars": fork.get("stargazers_count") or 0,
+            "forks": fork.get("forks_count") or 0,
+            "open_issues": fork.get("open_issues_count") or 0,
+            "parent_repo_id": parent_repo_id,
+            "created_at": _parse_dt(fork.get("created_at")),
+            "updated_at": _parse_dt(fork.get("updated_at")),
+            "pushed_at": _parse_dt(fork.get("pushed_at")),
+        },
+    )
+    return int(fork["id"])
+
+
+def _upsert_issue(cur: Any, repo_id: int, issue: dict) -> Optional[int]:
+    """Upsert one issue (and its labels). Returns issue_id."""
+    user = issue.get("user")
+    author_id = _upsert_contributor(cur, user)
+    is_pr = "pull_request" in issue
+    cur.execute(
+        """
+        INSERT INTO issues (
+            repo_id, number, title, state, author_id, is_pull_request,
+            created_at, updated_at, closed_at, html_url
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (repo_id, number) DO UPDATE SET
+            title = EXCLUDED.title,
+            state = EXCLUDED.state,
+            author_id = COALESCE(EXCLUDED.author_id, issues.author_id),
+            is_pull_request = EXCLUDED.is_pull_request,
+            updated_at = EXCLUDED.updated_at,
+            closed_at = EXCLUDED.closed_at
+        RETURNING issue_id
+        """,
+        (
+            repo_id,
+            issue["number"],
+            issue.get("title"),
+            issue.get("state") or "open",
+            author_id,
+            is_pr,
+            _parse_dt(issue.get("created_at")),
+            _parse_dt(issue.get("updated_at")),
+            _parse_dt(issue.get("closed_at")),
+            issue.get("html_url"),
+        ),
+    )
+    issue_id = cur.fetchone()["issue_id"]
+    cur.execute("DELETE FROM issue_labels WHERE issue_id = %s", (issue_id,))
+    for label in issue.get("labels") or []:
+        label_name = label.get("name") if isinstance(label, dict) else str(label)
+        if not label_name:
+            continue
+        cur.execute(
+            """
+            INSERT INTO issue_labels (issue_id, label)
+            VALUES (%s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (issue_id, label_name),
+        )
+    return int(issue_id)
 
 
 def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: str) -> int:
@@ -135,12 +239,12 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     repo_id, org_id, owner_login, name, full_name, description, html_url,
                     default_branch, language_primary, stars, forks_count, open_issues_count,
                     watchers_count, size_kb, is_fork, is_archived, parent_repo_id,
-                    created_at, updated_at, pushed_at, last_activity_at, synced_at
+                    sync_depth, created_at, updated_at, pushed_at, last_activity_at, synced_at
                 ) VALUES (
                     %(repo_id)s, %(org_id)s, %(owner_login)s, %(name)s, %(full_name)s, %(description)s,
                     %(html_url)s, %(default_branch)s, %(language_primary)s, %(stars)s, %(forks)s,
                     %(open_issues)s, %(watchers)s, %(size_kb)s, %(is_fork)s, %(is_archived)s,
-                    %(parent_repo_id)s, %(created_at)s, %(updated_at)s, %(pushed_at)s,
+                    %(parent_repo_id)s, 'full', %(created_at)s, %(updated_at)s, %(pushed_at)s,
                     %(pushed_at)s, NOW()
                 )
                 ON CONFLICT (repo_id) DO UPDATE SET
@@ -154,6 +258,7 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     size_kb = EXCLUDED.size_kb,
                     is_archived = EXCLUDED.is_archived,
                     parent_repo_id = COALESCE(EXCLUDED.parent_repo_id, repositories.parent_repo_id),
+                    sync_depth = 'full',
                     updated_at = EXCLUDED.updated_at,
                     pushed_at = EXCLUDED.pushed_at,
                     last_activity_at = GREATEST(
@@ -186,7 +291,8 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                 },
             )
 
-            # Languages
+            # Languages — replace snapshot so removed languages do not linger
+            cur.execute("DELETE FROM repo_languages WHERE repo_id = %s", (repo_id,))
             languages = client.get_languages(owner, repo)
             total_bytes = sum(languages.values()) or 1
             for lang_name, bytes_count in languages.items():
@@ -210,7 +316,8 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     (repo_id, language_id, bytes_count, round(bytes_count / total_bytes * 100, 3)),
                 )
 
-            # Contributors
+            # Contributors — replace snapshot
+            cur.execute("DELETE FROM repo_contributors WHERE repo_id = %s", (repo_id,))
             for contributor in client.get_contributors(owner, repo, limit=100):
                 cid = _upsert_contributor(cur, contributor)
                 if cid is None:
@@ -258,58 +365,34 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     ),
                 )
 
-            # Issues (includes PRs flagged)
+            # Issues (newest sample) + targeted beginner labels
+            seen_issue_numbers: set[int] = set()
             for issue in client.get_issues(owner, repo, limit=100):
-                user = issue.get("user")
-                author_id = _upsert_contributor(cur, user)
-                is_pr = "pull_request" in issue
-                cur.execute(
-                    """
-                    INSERT INTO issues (
-                        repo_id, number, title, state, author_id, is_pull_request,
-                        created_at, updated_at, closed_at, html_url
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (repo_id, number) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        state = EXCLUDED.state,
-                        author_id = COALESCE(EXCLUDED.author_id, issues.author_id),
-                        is_pull_request = EXCLUDED.is_pull_request,
-                        updated_at = EXCLUDED.updated_at,
-                        closed_at = EXCLUDED.closed_at
-                    RETURNING issue_id
-                    """,
-                    (
-                        repo_id,
-                        issue["number"],
-                        issue.get("title"),
-                        issue.get("state") or "open",
-                        author_id,
-                        is_pr,
-                        _parse_dt(issue.get("created_at")),
-                        _parse_dt(issue.get("updated_at")),
-                        _parse_dt(issue.get("closed_at")),
-                        issue.get("html_url"),
-                    ),
-                )
-                issue_id = cur.fetchone()["issue_id"]
-                cur.execute("DELETE FROM issue_labels WHERE issue_id = %s", (issue_id,))
-                for label in issue.get("labels") or []:
-                    label_name = label.get("name") if isinstance(label, dict) else str(label)
-                    if not label_name:
-                        continue
-                    cur.execute(
-                        """
-                        INSERT INTO issue_labels (issue_id, label)
-                        VALUES (%s, %s)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (issue_id, label_name),
-                    )
+                if not issue.get("number"):
+                    continue
+                seen_issue_numbers.add(int(issue["number"]))
+                _upsert_issue(cur, repo_id, issue)
 
-            # Pull requests
+            for label in ("good first issue", "help wanted", "beginner"):
+                try:
+                    labeled = client.get_labeled_issues(owner, repo, label, limit=30)
+                except Exception:
+                    labeled = []
+                for issue in labeled:
+                    num = issue.get("number")
+                    if not num or int(num) in seen_issue_numbers:
+                        continue
+                    seen_issue_numbers.add(int(num))
+                    _upsert_issue(cur, repo_id, issue)
+
+            # Pull requests — list endpoint omits additions/deletions/changed_files
             for pr in client.get_pulls(owner, repo, limit=50):
                 user = pr.get("user")
                 author_id = _upsert_contributor(cur, user)
+                # Only store churn when GitHub actually returned the fields
+                additions = pr.get("additions") if "additions" in pr else None
+                deletions = pr.get("deletions") if "deletions" in pr else None
+                changed_files = pr.get("changed_files") if "changed_files" in pr else None
                 cur.execute(
                     """
                     INSERT INTO pull_requests (
@@ -340,12 +423,22 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                         _parse_dt(pr.get("updated_at")),
                         _parse_dt(pr.get("closed_at")),
                         _parse_dt(pr.get("merged_at")),
-                        pr.get("additions") or 0,
-                        pr.get("deletions") or 0,
-                        pr.get("changed_files") or 0,
+                        additions,
+                        deletions,
+                        changed_files,
                         pr.get("html_url"),
                     ),
                 )
+
+            # Sample child forks so RepoDetail Forks tab / fn_repo_fork_tree has data
+            # Failures here must not roll back the full sync (GitHub sometimes 500s /forks)
+            forks_count = int(data.get("forks_count") or 0)
+            if forks_count > 0 and forks_count < 50000:
+                try:
+                    for fork in client.get_forks(owner, repo, limit=5):
+                        _upsert_child_fork(cur, fork, repo_id)
+                except Exception:
+                    pass
 
     return repo_id
 
@@ -356,13 +449,13 @@ def refresh_analytics(conn: Connection) -> None:
     conn.commit()
 
 
-def run_ingest(
+def resolve_ingest_targets(
     query: Optional[str] = None,
     limit: int = 20,
     repos: Optional[list[str]] = None,
     use_seed: bool = True,
-) -> dict[str, Any]:
-    """Ingest repositories from an explicit list, search query, and/or seed set."""
+) -> list[str]:
+    """Resolve owner/repo targets from seed list, explicit repos, and/or search."""
     targets: list[str] = []
     if repos:
         targets.extend(repos)
@@ -377,67 +470,144 @@ def run_ingest(
                 if full and full not in targets:
                     targets.append(full)
 
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        unique_targets = []
-        for t in targets:
-            key = t.lower()
-            if key not in seen:
-                seen.add(key)
-                unique_targets.append(t)
-        unique_targets = unique_targets[:limit]
+    seen: set[str] = set()
+    unique_targets: list[str] = []
+    for t in targets:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_targets.append(t)
+    return unique_targets[:limit]
 
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO sync_runs (status, query_used, repos_synced)
-                    VALUES ('running', %s, 0)
-                    RETURNING sync_id
-                    """,
-                    (query or ",".join(unique_targets[:5]),),
-                )
-                sync_id = cur.fetchone()["sync_id"]
-            conn.commit()
 
-            synced = 0
-            errors: list[str] = []
-            for full_name in unique_targets:
+def _update_sync_progress(
+    conn: Connection,
+    sync_id: int,
+    *,
+    synced: Optional[int] = None,
+    status: Optional[str] = None,
+    error_message: Optional[str] = None,
+    finished: bool = False,
+    set_error: bool = False,
+) -> None:
+    parts = []
+    params: dict[str, Any] = {"sync_id": sync_id}
+    if synced is not None:
+        parts.append("repos_synced = %(synced)s")
+        params["synced"] = synced
+    if status is not None:
+        parts.append("status = %(status)s")
+        params["status"] = status
+    if set_error:
+        parts.append("error_message = %(error_message)s")
+        params["error_message"] = error_message
+    if finished:
+        parts.append("finished_at = NOW()")
+    if not parts:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE sync_runs SET {', '.join(parts)} WHERE sync_id = %(sync_id)s",
+            params,
+        )
+    conn.commit()
+
+
+def execute_ingest_run(sync_id: int, targets: list[str]) -> dict[str, Any]:
+    """Run ingest for an existing sync_runs row; updates progress after each repo."""
+    synced = 0
+    errors: list[str] = []
+    try:
+        with GitHubClient() as client:
+            with get_connection() as conn:
+                _update_sync_progress(conn, sync_id, status="running", synced=0)
+                for full_name in targets:
+                    try:
+                        owner, name = full_name.split("/", 1)
+                        sync_repository(conn, client, owner, name)
+                        synced += 1
+                    except Exception as exc:  # noqa: BLE001 — collect and continue
+                        errors.append(f"{full_name}: {exc}")
+                        conn.rollback()
+                    try:
+                        _update_sync_progress(conn, sync_id, synced=synced)
+                    except Exception:
+                        conn.rollback()
+                        _update_sync_progress(conn, sync_id, synced=synced)
+
                 try:
-                    owner, name = full_name.split("/", 1)
-                    sync_repository(conn, client, owner, name)
-                    synced += 1
-                except Exception as exc:  # noqa: BLE001 — collect and continue
-                    errors.append(f"{full_name}: {exc}")
+                    refresh_analytics(conn)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"analytics: {exc}")
+                    conn.rollback()
 
-            try:
-                refresh_analytics(conn)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"analytics: {exc}")
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE sync_runs
-                    SET finished_at = NOW(),
-                        status = %s,
-                        repos_synced = %s,
-                        error_message = %s
-                    WHERE sync_id = %s
-                    """,
-                    (
-                        "completed" if not errors else "completed_with_errors",
-                        synced,
-                        "\n".join(errors)[:4000] if errors else None,
-                        sync_id,
-                    ),
+                _update_sync_progress(
+                    conn,
+                    sync_id,
+                    synced=synced,
+                    status="completed" if not errors else "completed_with_errors",
+                    error_message="\n".join(errors)[:4000] if errors else None,
+                    set_error=True,
+                    finished=True,
                 )
-            conn.commit()
+    except Exception as exc:  # noqa: BLE001 — mark run failed if worker crashes
+        with get_connection() as conn:
+            _update_sync_progress(
+                conn,
+                sync_id,
+                synced=synced,
+                status="failed",
+                error_message=str(exc)[:4000],
+                set_error=True,
+                finished=True,
+            )
+        raise
 
     return {
         "sync_id": sync_id,
-        "repos_requested": len(unique_targets),
+        "repos_requested": len(targets),
         "repos_synced": synced,
         "errors": errors,
-        "targets": unique_targets,
+        "targets": targets,
     }
+
+
+def create_ingest_run(
+    query: Optional[str] = None,
+    limit: int = 20,
+    repos: Optional[list[str]] = None,
+    use_seed: bool = True,
+) -> dict[str, Any]:
+    """Create a sync_runs row and resolve targets (does not fetch repo graphs yet)."""
+    targets = resolve_ingest_targets(query=query, limit=limit, repos=repos, use_seed=use_seed)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sync_runs (status, query_used, repos_synced, repos_requested)
+                VALUES ('queued', %s, 0, %s)
+                RETURNING sync_id
+                """,
+                (query or ",".join(targets[:5]), len(targets)),
+            )
+            sync_id = cur.fetchone()["sync_id"]
+        conn.commit()
+    return {
+        "sync_id": sync_id,
+        "repos_requested": len(targets),
+        "repos_synced": 0,
+        "status": "queued",
+        "targets": targets,
+        "errors": [],
+    }
+
+
+def run_ingest(
+    query: Optional[str] = None,
+    limit: int = 20,
+    repos: Optional[list[str]] = None,
+    use_seed: bool = True,
+) -> dict[str, Any]:
+    """Ingest repositories synchronously (CLI / scripts)."""
+    started = create_ingest_run(query=query, limit=limit, repos=repos, use_seed=use_seed)
+    return execute_ingest_run(started["sync_id"], started["targets"])

@@ -31,13 +31,16 @@ export default function RepoListItem({
           <Link as={RouterLink} to={`/repos/${repo.repo_id}`} className="repo-row-name">
             {repo.full_name}
           </Link>
+          {repo.sync_depth === 'stub' && (
+            <Label variant="attention" size="small">Fork stub</Label>
+          )}
           {repo.is_abandoned && (
             <Label variant="danger" size="small">Abandoned</Label>
           )}
           {repo.is_archived && !repo.is_abandoned && (
             <Label variant="attention" size="small">Archived</Label>
           )}
-          {!repo.is_abandoned && !repo.is_archived && (
+          {!repo.is_abandoned && !repo.is_archived && repo.sync_depth !== 'stub' && (
             <Label variant="secondary" size="small">Public</Label>
           )}
         </div>

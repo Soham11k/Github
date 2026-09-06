@@ -67,12 +67,31 @@ FROM v_org_analytics ORDER BY org_rank LIMIT 10;
 SELECT sync_id, status, repos_synced, duration_seconds, audit_events_during_run
 FROM v_sync_history LIMIT 5;
 
-\echo '=== 8. INDEXING: EXPLAIN ANALYZE on starred/health lookup ==='
+\echo '=== 8. INDEXING: EXPLAIN before/after dropping stars index ==='
+\echo '--- BEFORE (with idx_repositories_stars_pushed) ---'
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT full_name, stars, health_score, pushed_at
 FROM repositories
 ORDER BY stars DESC, pushed_at DESC NULLS LAST
 LIMIT 20;
+
+DROP INDEX IF EXISTS idx_repositories_stars_pushed;
+
+\echo '--- AFTER (index dropped) ---'
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT full_name, stars, health_score, pushed_at
+FROM repositories
+ORDER BY stars DESC, pushed_at DESC NULLS LAST
+LIMIT 20;
+
+CREATE INDEX IF NOT EXISTS idx_repositories_stars_pushed
+    ON repositories (stars DESC, pushed_at DESC);
+
+\echo '=== 8b. MATERIALIZED VIEW: mv_repo_health_summary ==='
+SELECT full_name, stars, health_score
+FROM mv_repo_health_summary
+ORDER BY health_score DESC
+LIMIT 10;
 
 \echo '=== 9. TRIGGERS: recent audit_log sample ==='
 SELECT table_name, action, record_id, changed_at
@@ -82,4 +101,9 @@ LIMIT 15;
 
 \echo '=== 10. TRANSACTIONS: demonstrated by ingest (per-repo BEGIN/COMMIT) ==='
 \echo 'See backend/app/services/ingest.py sync_repository() — conn.transaction()'
+
+\echo '=== 11. READ-ONLY ROLE: osint_ro (SELECT only — grader demo) ==='
+\echo 'Connect as: psql -h localhost -d github_osint -U osint_ro  (password osint_ro)'
+\echo 'Should succeed: SELECT COUNT(*) FROM repositories;'
+\echo 'Should fail:    INSERT INTO languages(name) VALUES (''x'');'
 \echo 'Demo script complete.'

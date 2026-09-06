@@ -36,8 +36,13 @@ export default function BeginnerFriendly() {
       ) : items.length === 0 ? (
         <EmptyState
           title="No beginner-friendly repos yet"
-          description="Ingest repositories that use good-first-issue labels, or load the demo seed."
+          description="Ingest repos with good-first-issue labels (try firstcontributions/first-contributions or scikit-learn/scikit-learn)."
           icon={LightBulbIcon}
+          action={
+            <Link as={RouterLink} to="/ingest" sx={{ mt: 2, display: 'inline-block' }}>
+              Open Ingest
+            </Link>
+          }
         />
       ) : (
         <div className="panel">

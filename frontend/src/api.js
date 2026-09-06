@@ -27,6 +27,7 @@ export const api = {
   orgs: (limit = 50) => request(`/api/orgs?limit=${limit}`),
   org: (id) => request(`/api/orgs/${id}`),
   syncRuns: (limit = 20) => request(`/api/sync-runs?limit=${limit}`),
+  syncRun: (id) => request(`/api/sync-runs/${id}`),
   contributors: (limit = 50) => request(`/api/contributors?limit=${limit}`),
   languages: () => request('/api/languages'),
   beginner: (limit = 50) => request(`/api/beginner-friendly?limit=${limit}`),

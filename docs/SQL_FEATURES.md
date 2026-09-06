@@ -14,7 +14,9 @@ Use this checklist during evaluation. Run [sql/demo_queries.sql](../sql/demo_que
 | **Functions returning tables/JSON** | procedures | `fn_compare_repos`, `fn_generate_repo_report` |
 | **Triggers** | [sql/triggers.sql](../sql/triggers.sql) | audit log; bump `last_activity_at`; contributor/commit caches |
 | **Transactions** | ingest | `with conn.transaction()` per repo in `ingest.py` |
-| **EXPLAIN / indexing** | demo §8 | `EXPLAIN (ANALYZE, BUFFERS)` on stars/health ordering |
+| **EXPLAIN / indexing** | demo §8 | before/after drop of `idx_repositories_stars_pushed` |
+| **Materialized views** | [sql/views.sql](../sql/views.sql) + `sp_refresh_analytics` | `mv_repo_health_summary` + `REFRESH MATERIALIZED VIEW` |
+| **Roles / least privilege** | [sql/grants.sql](../sql/grants.sql) | `osint` (read/write) vs `osint_ro` (SELECT only) |
 
 ## Key views for the UI
 
@@ -24,3 +26,4 @@ Use this checklist during evaluation. Run [sql/demo_queries.sql](../sql/demo_que
 - `v_org_analytics` — org leaderboard
 - `v_sync_history` — ingest transparency
 - `v_beginner_friendly` / `v_inactive_repos` / `v_contributor_rankings` / `v_language_popularity`
+- `mv_repo_health_summary` — materialized snapshot refreshed after ingest

@@ -1,14 +1,18 @@
 -- Stored procedures / functions for health scoring and reports
 --
 -- Health score weights (must match v_health_factors):
---   commit velocity     0–25  (1.5 pts per commit in last 90d, capped)
---   unique contributors 0–20  (2 pts each, capped)
+--   commit velocity     0–25  (sampled commits_90d × 1.5, OR push-activity floor)
+--   unique contributors 0–20  (2 pts each, capped; uses contributor_count_cache)
 --   issue resolution    0–25  (close rate × 25; default 12 if no issues)
 --   median time-to-close 0–10 (faster close = higher)
 --   PR merge rate       0–15  (merge rate × 15; default 7 if no PRs)
---   recency             -10–5 (recent push bonus / stale penalty)
+--   recency             -15–10 (GitHub pushed_at — trusted even when samples are thin)
 --   archived            −30
 -- Final score clamped to [0, 100].
+--
+-- Ingest sample note: live sync stores ~latest 100 commits / issues / PRs per repo.
+-- Mega-repos therefore under-count velocity; we use pushed_at floors so active
+-- projects are not scored as abandoned.
 
 -- Refresh repository health scores
 CREATE OR REPLACE PROCEDURE sp_refresh_health_scores()
@@ -24,10 +28,16 @@ BEGIN
         SELECT
             r2.repo_id,
             LEAST(100, GREATEST(0, ROUND((
-                -- Commit velocity (0-25): commits in last 90 days
-                LEAST(25, COALESCE(cs.commits_90d, 0) * 1.5)
+                -- Commit velocity (0-25): sampled commits, else recent-push floor
+                CASE
+                    WHEN COALESCE(cs.commits_90d, 0) > 0
+                        THEN LEAST(25, cs.commits_90d * 1.5)
+                    WHEN r2.pushed_at >= NOW() - INTERVAL '30 days' THEN 18
+                    WHEN r2.pushed_at >= NOW() - INTERVAL '90 days' THEN 10
+                    ELSE 0
+                END
                 -- Unique contributors (0-20)
-                + LEAST(20, COALESCE(cs.unique_committers, r2.contributor_count_cache, 0) * 2)
+                + LEAST(20, COALESCE(NULLIF(cs.unique_committers, 0), r2.contributor_count_cache, 0) * 2)
                 -- Issue resolution (0-25)
                 + CASE
                     WHEN COALESCE(iss.total_issues, 0) = 0 THEN 12
@@ -46,13 +56,14 @@ BEGIN
                     WHEN COALESCE(pr.total_prs, 0) = 0 THEN 7
                     ELSE LEAST(15, (pr.merged_prs::NUMERIC / NULLIF(pr.total_prs, 0)) * 15)
                   END
-                -- Recency penalty/bonus (0-5, can go negative via clamp)
+                -- Recency from GitHub pushed_at (-15..10) — primary signal for mega-repos
                 + CASE
                     WHEN r2.pushed_at IS NULL THEN 0
-                    WHEN r2.pushed_at >= NOW() - INTERVAL '30 days' THEN 5
-                    WHEN r2.pushed_at >= NOW() - INTERVAL '90 days' THEN 3
+                    WHEN r2.pushed_at >= NOW() - INTERVAL '14 days' THEN 10
+                    WHEN r2.pushed_at >= NOW() - INTERVAL '30 days' THEN 7
+                    WHEN r2.pushed_at >= NOW() - INTERVAL '90 days' THEN 4
                     WHEN r2.pushed_at >= NOW() - INTERVAL '180 days' THEN 1
-                    ELSE -10
+                    ELSE -15
                   END
                 -- Archived penalty
                 - CASE WHEN r2.is_archived THEN 30 ELSE 0 END
@@ -83,11 +94,14 @@ BEGIN
             WHERE p.repo_id = r2.repo_id
         ) pr ON TRUE
     ) sub
-    WHERE r.repo_id = sub.repo_id;
+    WHERE r.repo_id = sub.repo_id
+      AND COALESCE(r.sync_depth, 'full') = 'full';
 END;
 $$;
 
 -- Mark abandoned / inactive repositories
+-- Primary signal is GitHub pushed_at (not the thin commit sample).
+-- Stub fork/parent rows are excluded from abandonment analytics.
 CREATE OR REPLACE PROCEDURE sp_mark_abandoned_repos(days_inactive INTEGER DEFAULT 180)
 LANGUAGE plpgsql
 AS $$
@@ -95,7 +109,8 @@ BEGIN
     UPDATE repositories
     SET is_abandoned = TRUE,
         synced_at = NOW()
-    WHERE is_archived = FALSE
+    WHERE COALESCE(sync_depth, 'full') = 'full'
+      AND is_archived = FALSE
       AND COALESCE(pushed_at, created_at) < NOW() - make_interval(days => days_inactive)
       AND NOT EXISTS (
           SELECT 1 FROM commits c
@@ -103,11 +118,12 @@ BEGIN
             AND c.committed_at >= NOW() - make_interval(days => days_inactive)
       );
 
-    -- Clear abandoned flag if activity resumed
+    -- Clear abandoned flag if GitHub push or sampled commits resumed
     UPDATE repositories
     SET is_abandoned = FALSE,
         synced_at = NOW()
     WHERE is_abandoned = TRUE
+      AND COALESCE(sync_depth, 'full') = 'full'
       AND (
           pushed_at >= NOW() - make_interval(days => days_inactive)
           OR EXISTS (
@@ -126,6 +142,13 @@ AS $$
 BEGIN
     CALL sp_refresh_health_scores();
     CALL sp_mark_abandoned_repos(180);
+    -- Plain REFRESH (safe inside CALL / client transactions; CONCURRENTLY is not)
+    BEGIN
+        REFRESH MATERIALIZED VIEW mv_repo_health_summary;
+    EXCEPTION
+        WHEN undefined_table THEN
+            NULL;
+    END;
 END;
 $$;
 

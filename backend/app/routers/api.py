@@ -1,10 +1,10 @@
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 
 from app.config import get_settings
 from app.db import execute, fetch_all, fetch_one
-from app.services.ingest import run_ingest
+from app.services.ingest import create_ingest_run, execute_ingest_run
 
 router = APIRouter(prefix="/api")
 
@@ -69,8 +69,9 @@ def dashboard() -> dict[str, Any]:
 def list_repos(
     q: Optional[str] = None,
     sort: str = Query("health", pattern="^(health|stars|activity|name)$"),
-    filter: Optional[str] = Query(None, pattern="^(beginner|abandoned|active)?$"),
+    filter: Optional[str] = Query(None, pattern="^(beginner|abandoned|active|stubs)?$"),
     language: Optional[str] = None,
+    include_stubs: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
@@ -91,6 +92,12 @@ def list_repos(
         base_from = "v_inactive_repos h"
     elif filter == "active":
         clauses.append("h.is_abandoned = FALSE AND h.is_archived = FALSE")
+    elif filter == "stubs":
+        base_from = "repositories h"
+        clauses.append("COALESCE(h.sync_depth, 'full') = 'stub'")
+    elif not include_stubs and filter not in ("beginner", "abandoned"):
+        # Default list is full-depth only (v_repo_health already filters stubs)
+        pass
 
     if sort == "stars":
         order = "h.stars DESC"
@@ -349,6 +356,9 @@ def ingest_status() -> dict[str, Any]:
     token_configured = bool(settings.github_token and settings.github_token.strip())
     authenticated_login: Optional[str] = None
     token_valid = False
+    rate_limit_remaining: Optional[int] = None
+    rate_limit_reset: Optional[str] = None
+    rate_limit_limit: Optional[int] = None
     if token_configured:
         from app.services.github_client import GitHubClient
 
@@ -357,16 +367,44 @@ def ingest_status() -> dict[str, Any]:
             if user and user.get("login"):
                 authenticated_login = str(user["login"])
                 token_valid = True
+            quota = client.get_rate_limit()
+            rate_limit_remaining = quota.get("rate_limit_remaining")
+            rate_limit_reset = quota.get("rate_limit_reset")
+            rate_limit_limit = quota.get("rate_limit_limit")
+    last_had_rate_limit = False
+    if last and last.get("error_message"):
+        err = str(last["error_message"]).lower()
+        last_had_rate_limit = "rate limit" in err or "429" in err or "secondary rate" in err
     return {
         "github_token_configured": token_configured,
         "token_valid": token_valid,
         "authenticated_login": authenticated_login,
+        "rate_limit_remaining": rate_limit_remaining,
+        "rate_limit_reset": rate_limit_reset,
+        "rate_limit_limit": rate_limit_limit,
+        "last_sync_had_rate_limit": last_had_rate_limit,
         "last_sync": last,
     }
 
 
+@router.get("/sync-runs/{sync_id}")
+def get_sync_run(sync_id: int) -> dict[str, Any]:
+    row = fetch_one(
+        """
+        SELECT *
+        FROM v_sync_history
+        WHERE sync_id = %s
+        """,
+        (sync_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Sync run not found")
+    return row
+
+
 @router.post("/ingest")
 def trigger_ingest(
+    background_tasks: BackgroundTasks,
     payload: Optional[dict[str, Any]] = None,
     x_admin_token: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
@@ -375,13 +413,17 @@ def trigger_ingest(
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
     body = payload or {}
-    result = run_ingest(
+    started = create_ingest_run(
         query=body.get("query"),
         limit=int(body.get("limit") or 10),
         repos=body.get("repos"),
         use_seed=bool(body.get("use_seed", True)),
     )
-    return result
+    background_tasks.add_task(execute_ingest_run, started["sync_id"], started["targets"])
+    return {
+        **started,
+        "message": "Ingest started in background; poll GET /api/sync-runs/{sync_id}",
+    }
 
 
 @router.post("/analytics/refresh")

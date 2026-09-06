@@ -1,5 +1,8 @@
 -- Analytics views using joins and window functions
 
+DROP VIEW IF EXISTS v_beginner_friendly CASCADE;
+DROP VIEW IF EXISTS v_repo_health CASCADE;
+
 -- Repository health breakdown + composite score context
 CREATE OR REPLACE VIEW v_repo_health AS
 WITH commit_stats AS (
@@ -48,6 +51,7 @@ scored AS (
         r.pushed_at,
         r.last_activity_at,
         r.health_score,
+        COALESCE(r.sync_depth, 'full') AS sync_depth,
         COALESCE(cs.commits_90d, 0) AS commits_90d,
         COALESCE(cs.commits_30d, 0) AS commits_30d,
         COALESCE(cs.unique_committers, r.contributor_count_cache, 0) AS unique_contributors,
@@ -70,6 +74,7 @@ scored AS (
     LEFT JOIN commit_stats cs ON cs.repo_id = r.repo_id
     LEFT JOIN issue_stats iss ON iss.repo_id = r.repo_id
     LEFT JOIN pr_stats pr ON pr.repo_id = r.repo_id
+    WHERE COALESCE(r.sync_depth, 'full') = 'full'
 )
 SELECT
     s.*,
@@ -225,9 +230,12 @@ SELECT
           AND c.committed_at >= NOW() - INTERVAL '180 days'
     ), 0) AS commits_180d
 FROM repositories r
-WHERE r.is_archived = TRUE
-   OR r.is_abandoned = TRUE
-   OR COALESCE(r.pushed_at, r.created_at) < NOW() - INTERVAL '180 days'
+WHERE COALESCE(r.sync_depth, 'full') = 'full'
+  AND (
+       r.is_archived = TRUE
+    OR r.is_abandoned = TRUE
+    OR COALESCE(r.pushed_at, r.created_at) < NOW() - INTERVAL '180 days'
+  )
 ORDER BY days_since_push DESC NULLS LAST;
 
 -- Dashboard summary helpers
@@ -240,7 +248,7 @@ DROP VIEW IF EXISTS v_commit_activity_daily CASCADE;
 
 CREATE OR REPLACE VIEW v_dashboard_kpis AS
 SELECT
-    (SELECT COUNT(*) FROM repositories) AS repo_count,
+    (SELECT COUNT(*) FROM repositories WHERE COALESCE(sync_depth, 'full') = 'full') AS repo_count,
     (SELECT COUNT(*) FROM contributors WHERE type <> 'Bot') AS contributor_count,
     (SELECT COUNT(*) FROM commits) AS commit_count,
     (SELECT COUNT(*) FROM issues WHERE NOT is_pull_request) AS issue_count,
@@ -248,10 +256,10 @@ SELECT
     (SELECT COUNT(*) FROM pull_requests WHERE state = 'open') AS open_pr_count,
     (SELECT COUNT(*) FROM languages) AS language_count,
     (SELECT COUNT(*) FROM organizations) AS org_count,
-    (SELECT ROUND(AVG(health_score), 2) FROM repositories) AS avg_health_score,
+    (SELECT ROUND(AVG(health_score), 2) FROM repositories WHERE COALESCE(sync_depth, 'full') = 'full') AS avg_health_score,
     (SELECT ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY health_score)::NUMERIC, 2)
-     FROM repositories) AS median_health_score,
-    (SELECT COUNT(*) FROM repositories WHERE is_abandoned) AS abandoned_count,
+     FROM repositories WHERE COALESCE(sync_depth, 'full') = 'full') AS median_health_score,
+    (SELECT COUNT(*) FROM repositories WHERE is_abandoned AND COALESCE(sync_depth, 'full') = 'full') AS abandoned_count,
     (SELECT COUNT(*) FROM v_beginner_friendly) AS beginner_friendly_count;
 
 CREATE OR REPLACE VIEW v_commit_activity_daily AS
@@ -266,14 +274,20 @@ GROUP BY DATE_TRUNC('day', committed_at)::DATE
 ORDER BY activity_date;
 
 -- Health factor breakdown (mirrors sp_refresh_health_scores weights)
+-- Note: commit velocity uses a pushed_at floor when the ~100-commit ingest sample is empty.
 CREATE OR REPLACE VIEW v_health_factors AS
 SELECT
     r.repo_id,
     r.full_name,
     r.health_score,
-    LEAST(25, COALESCE(cs.commits_90d, 0) * 1.5)::NUMERIC(6, 2) AS factor_commit_velocity,
+    CASE
+        WHEN COALESCE(cs.commits_90d, 0) > 0 THEN LEAST(25, cs.commits_90d * 1.5)
+        WHEN r.pushed_at >= NOW() - INTERVAL '30 days' THEN 18
+        WHEN r.pushed_at >= NOW() - INTERVAL '90 days' THEN 10
+        ELSE 0
+    END::NUMERIC(6, 2) AS factor_commit_velocity,
     LEAST(25, 25)::NUMERIC AS factor_commit_velocity_max,
-    LEAST(20, COALESCE(cs.unique_committers, r.contributor_count_cache, 0) * 2)::NUMERIC(6, 2) AS factor_contributors,
+    LEAST(20, COALESCE(NULLIF(cs.unique_committers, 0), r.contributor_count_cache, 0) * 2)::NUMERIC(6, 2) AS factor_contributors,
     LEAST(20, 20)::NUMERIC AS factor_contributors_max,
     CASE
         WHEN COALESCE(iss.total_issues, 0) = 0 THEN 12
@@ -295,15 +309,16 @@ SELECT
     15::NUMERIC AS factor_pr_merge_max,
     CASE
         WHEN r.pushed_at IS NULL THEN 0
-        WHEN r.pushed_at >= NOW() - INTERVAL '30 days' THEN 5
-        WHEN r.pushed_at >= NOW() - INTERVAL '90 days' THEN 3
+        WHEN r.pushed_at >= NOW() - INTERVAL '14 days' THEN 10
+        WHEN r.pushed_at >= NOW() - INTERVAL '30 days' THEN 7
+        WHEN r.pushed_at >= NOW() - INTERVAL '90 days' THEN 4
         WHEN r.pushed_at >= NOW() - INTERVAL '180 days' THEN 1
-        ELSE -10
+        ELSE -15
     END::NUMERIC(6, 2) AS factor_recency,
-    5::NUMERIC AS factor_recency_max,
+    10::NUMERIC AS factor_recency_max,
     CASE WHEN r.is_archived THEN 30 ELSE 0 END::NUMERIC(6, 2) AS factor_archived_penalty,
     COALESCE(cs.commits_90d, 0) AS commits_90d,
-    COALESCE(cs.unique_committers, r.contributor_count_cache, 0) AS unique_committers,
+    COALESCE(NULLIF(cs.unique_committers, 0), r.contributor_count_cache, 0) AS unique_committers,
     COALESCE(iss.total_issues, 0) AS total_issues,
     COALESCE(iss.closed_issues, 0) AS closed_issues,
     iss.median_days_to_close,
@@ -333,7 +348,8 @@ LEFT JOIN LATERAL (
         COUNT(*) FILTER (WHERE p.is_merged) AS merged_prs
     FROM pull_requests p
     WHERE p.repo_id = r.repo_id
-) pr ON TRUE;
+) pr ON TRUE
+WHERE COALESCE(r.sync_depth, 'full') = 'full';
 
 -- Monthly activity with MoM LAG deltas
 CREATE OR REPLACE VIEW v_repo_monthly_activity AS
@@ -348,6 +364,7 @@ WITH months AS (
         DATE_TRUNC('month', NOW()),
         INTERVAL '1 month'
     ) AS gs(month_start)
+    WHERE COALESCE(r.sync_depth, 'full') = 'full'
 ),
 counts AS (
     SELECT
@@ -402,7 +419,9 @@ WITH org_repos AS (
         MODE() WITHIN GROUP (ORDER BY r.language_primary)
             FILTER (WHERE r.language_primary IS NOT NULL) AS top_language
     FROM organizations o
-    LEFT JOIN repositories r ON r.org_id = o.org_id
+    LEFT JOIN repositories r
+      ON r.org_id = o.org_id
+     AND COALESCE(r.sync_depth, 'full') = 'full'
     GROUP BY o.org_id, o.login, o.name, o.html_url, o.description
 )
 SELECT
@@ -433,6 +452,7 @@ SELECT
     s.status,
     s.query_used,
     s.repos_synced,
+    s.repos_requested,
     s.error_message,
     EXTRACT(EPOCH FROM (COALESCE(s.finished_at, NOW()) - s.started_at)) AS duration_seconds,
     (
@@ -441,3 +461,33 @@ SELECT
     ) AS audit_events_during_run
 FROM sync_runs s
 ORDER BY s.started_at DESC;
+
+-- Materialized health summary (refreshed by sp_refresh_analytics)
+DROP MATERIALIZED VIEW IF EXISTS mv_repo_health_summary;
+CREATE MATERIALIZED VIEW mv_repo_health_summary AS
+SELECT
+    r.repo_id,
+    r.full_name,
+    r.owner_login,
+    r.language_primary,
+    r.stars,
+    r.health_score,
+    r.is_abandoned,
+    r.is_archived,
+    r.pushed_at,
+    r.last_activity_at
+FROM repositories r
+WHERE COALESCE(r.sync_depth, 'full') = 'full'
+WITH DATA;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_repo_health_summary_repo
+    ON mv_repo_health_summary (repo_id);
+CREATE INDEX IF NOT EXISTS idx_mv_repo_health_summary_health
+    ON mv_repo_health_summary (health_score DESC);
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'osint') THEN
+    EXECUTE 'ALTER MATERIALIZED VIEW mv_repo_health_summary OWNER TO osint';
+  END IF;
+END $$;
