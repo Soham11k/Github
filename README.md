@@ -72,7 +72,7 @@ docker compose up --build
 | http://localhost:8080/ | UI (nginx → API) |
 | http://localhost:8000/docs | API |
 
-First DB boot loads schema + offline SQL seed. If `GITHUB_TOKEN` is set and the DB still has **0** repos when `api` starts, the container **live-ingests** the seed list (limit 8) before serving.
+First DB boot loads schema (+ optional offline SQL seed if mounted). If `GITHUB_TOKEN` is set and the DB still has **0** repos when `api` starts, the container **live-ingests** the seed list (limit **50**) before serving.
 
 Postgres is **not** published on host `:5432` by default (internal Docker network only). To expose it for host `psql`, uncomment the `ports` block under `db` in `docker-compose.yml`.
 

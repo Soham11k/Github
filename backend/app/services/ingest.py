@@ -6,6 +6,7 @@ from typing import Any, Optional
 from psycopg import Connection
 
 from app.db import get_connection
+from app.config import get_settings
 from app.services.github_client import DEFAULT_SEED_REPOS, GitHubClient
 
 
@@ -316,9 +317,13 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     (repo_id, language_id, bytes_count, round(bytes_count / total_bytes * 100, 3)),
                 )
 
+            caps = get_settings()
+
             # Contributors — replace snapshot
             cur.execute("DELETE FROM repo_contributors WHERE repo_id = %s", (repo_id,))
-            for contributor in client.get_contributors(owner, repo, limit=100):
+            for contributor in client.get_contributors(
+                owner, repo, limit=caps.ingest_contributor_limit
+            ):
                 cid = _upsert_contributor(cur, contributor)
                 if cid is None:
                     continue
@@ -333,7 +338,7 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                 )
 
             # Commits (disable activity trigger bulk-update by using ON CONFLICT)
-            for commit in client.get_commits(owner, repo, limit=100):
+            for commit in client.get_commits(owner, repo, limit=caps.ingest_commit_limit):
                 author = commit.get("author") or {}
                 commit_data = commit.get("commit") or {}
                 author_info = commit_data.get("author") or {}
@@ -367,7 +372,7 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
 
             # Issues (newest sample) + targeted beginner labels
             seen_issue_numbers: set[int] = set()
-            for issue in client.get_issues(owner, repo, limit=100):
+            for issue in client.get_issues(owner, repo, limit=caps.ingest_issue_limit):
                 if not issue.get("number"):
                     continue
                 seen_issue_numbers.add(int(issue["number"]))
@@ -375,7 +380,9 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
 
             for label in ("good first issue", "help wanted", "beginner"):
                 try:
-                    labeled = client.get_labeled_issues(owner, repo, label, limit=30)
+                    labeled = client.get_labeled_issues(
+                        owner, repo, label, limit=caps.ingest_labeled_issue_limit
+                    )
                 except Exception:
                     labeled = []
                 for issue in labeled:
@@ -385,11 +392,24 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     seen_issue_numbers.add(int(num))
                     _upsert_issue(cur, repo_id, issue)
 
-            # Pull requests — list endpoint omits additions/deletions/changed_files
-            for pr in client.get_pulls(owner, repo, limit=50):
+            # Pull requests — list then detail-fetch for churn fields
+            pulls = client.get_pulls(owner, repo, limit=caps.ingest_pr_limit)
+            detail_budget = caps.ingest_pr_detail_limit
+            for pr in pulls:
+                if (
+                    detail_budget > 0
+                    and ("additions" not in pr or pr.get("additions") is None)
+                    and pr.get("number")
+                ):
+                    try:
+                        detailed = client.get_pull(owner, repo, int(pr["number"]))
+                        if detailed:
+                            pr = detailed
+                        detail_budget -= 1
+                    except Exception:
+                        detail_budget -= 1
                 user = pr.get("user")
                 author_id = _upsert_contributor(cur, user)
-                # Only store churn when GitHub actually returned the fields
                 additions = pr.get("additions") if "additions" in pr else None
                 deletions = pr.get("deletions") if "deletions" in pr else None
                 changed_files = pr.get("changed_files") if "changed_files" in pr else None
@@ -408,9 +428,9 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                         updated_at = EXCLUDED.updated_at,
                         closed_at = EXCLUDED.closed_at,
                         merged_at = EXCLUDED.merged_at,
-                        additions = EXCLUDED.additions,
-                        deletions = EXCLUDED.deletions,
-                        changed_files = EXCLUDED.changed_files
+                        additions = COALESCE(EXCLUDED.additions, pull_requests.additions),
+                        deletions = COALESCE(EXCLUDED.deletions, pull_requests.deletions),
+                        changed_files = COALESCE(EXCLUDED.changed_files, pull_requests.changed_files)
                     """,
                     (
                         repo_id,
@@ -433,9 +453,9 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
             # Sample child forks so RepoDetail Forks tab / fn_repo_fork_tree has data
             # Failures here must not roll back the full sync (GitHub sometimes 500s /forks)
             forks_count = int(data.get("forks_count") or 0)
-            if forks_count > 0 and forks_count < 50000:
+            if forks_count > 0:
                 try:
-                    for fork in client.get_forks(owner, repo, limit=5):
+                    for fork in client.get_forks(owner, repo, limit=caps.ingest_fork_limit):
                         _upsert_child_fork(cur, fork, repo_id)
                 except Exception:
                     pass

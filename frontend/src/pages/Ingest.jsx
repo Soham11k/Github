@@ -15,6 +15,14 @@ import { ErrorState, LoadingState } from '../components/StateBanner'
 
 const TOKEN_KEY = 'osint_admin_token'
 
+const SEARCH_PRESETS = [
+  { label: 'Good first issues', query: 'good-first-issues:>10 stars:>1000' },
+  { label: 'Python stars', query: 'stars:>50000 language:python' },
+  { label: 'TypeScript', query: 'stars:>30000 language:typescript' },
+  { label: 'ML topic', query: 'topic:machine-learning stars:>5000' },
+  { label: 'Help wanted', query: 'help-wanted-issues:>5 stars:>2000' },
+]
+
 function formatTs(value) {
   if (!value) return '—'
   try {
@@ -46,6 +54,7 @@ export default function Ingest() {
     'firstcontributions/first-contributions\nscikit-learn/scikit-learn\nfacebook/react\npallets/flask',
   )
   const [limit, setLimit] = useState(12)
+  const [refreshing, setRefreshing] = useState(false)
 
   const refresh = useCallback(async () => {
     const [st, sync] = await Promise.all([api.ingestStatus(), api.syncRuns(10)])
@@ -92,22 +101,11 @@ export default function Ingest() {
     }
   }, [activeSyncId, refresh])
 
-  async function onSubmit(e) {
-    e.preventDefault()
+  async function startIngest(body) {
     setSubmitting(true)
     setError('')
     setActiveRun(null)
     try {
-      const repos = reposText
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-      const body = {
-        use_seed: useSeed,
-        limit: Number(limit) || 12,
-        query: query.trim() || null,
-        repos: repos.length ? repos : null,
-      }
       const res = await api.ingest(body, adminToken)
       setActiveSyncId(res.sync_id)
       setActiveRun({
@@ -119,6 +117,37 @@ export default function Ingest() {
     } catch (err) {
       setError(err.message || String(err))
       setSubmitting(false)
+    }
+  }
+
+  async function onSubmit(e) {
+    e.preventDefault()
+    const repos = reposText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+    await startIngest({
+      use_seed: useSeed,
+      limit: Number(limit) || 12,
+      query: query.trim() || null,
+      repos: repos.length ? repos : null,
+    })
+  }
+
+  async function onSurprise() {
+    await startIngest({ mode: 'surprise', use_seed: false, limit: 5 })
+  }
+
+  async function onRefreshAnalytics() {
+    setRefreshing(true)
+    setError('')
+    try {
+      await api.refreshAnalytics(adminToken)
+      await refresh()
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -237,7 +266,23 @@ export default function Ingest() {
             placeholder='stars:>20000 language:python'
             block
           />
+          <FormControl.Caption>Click a preset to fill the query.</FormControl.Caption>
         </FormControl>
+        <div className="ingest-presets">
+          {SEARCH_PRESETS.map((p) => (
+            <Button
+              key={p.label}
+              size="small"
+              type="button"
+              onClick={() => {
+                setQuery(p.query)
+                setUseSeed(false)
+              }}
+            >
+              {p.label}
+            </Button>
+          ))}
+        </div>
 
         <FormControl>
           <FormControl.Label>Repos (owner/repo, one per line)</FormControl.Label>
@@ -261,9 +306,17 @@ export default function Ingest() {
           />
         </FormControl>
 
-        <Button type="submit" variant="primary" disabled={submitting} leadingVisual={SyncIcon}>
-          {submitting ? 'Syncing…' : 'Run ingest'}
-        </Button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <Button type="submit" variant="primary" disabled={submitting} leadingVisual={SyncIcon}>
+            {submitting ? 'Syncing…' : 'Run ingest'}
+          </Button>
+          <Button type="button" disabled={submitting} onClick={onSurprise}>
+            Surprise me (5 repos)
+          </Button>
+          <Button type="button" disabled={refreshing || submitting} onClick={onRefreshAnalytics}>
+            {refreshing ? 'Refreshing…' : 'Refresh analytics'}
+          </Button>
+        </div>
       </form>
 
       <div className="panel">

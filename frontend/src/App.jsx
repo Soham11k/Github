@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import { BaseStyles, ThemeProvider } from '@primer/react'
 import AppHeader from './components/AppHeader'
+import DataAsOfBanner from './components/DataAsOfBanner'
 import Explore from './pages/Explore'
 import Repositories from './pages/Repositories'
 import RepoDetail from './pages/RepoDetail'
@@ -22,6 +23,7 @@ export default function App() {
       <BaseStyles>
         <div className="app-shell">
           <AppHeader />
+          <DataAsOfBanner />
           <main className="app-main">
             <Routes>
               <Route path="/" element={<Explore />} />

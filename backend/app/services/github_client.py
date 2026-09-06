@@ -111,6 +111,27 @@ class GitHubClient:
     def get(self, path: str, params: Optional[dict] = None) -> Any:
         return self._request("GET", path, params=params)
 
+    def _paginate(self, path: str, params: Optional[dict], limit: int) -> list[dict]:
+        """Collect list items across pages until limit or exhaustion."""
+        results: list[dict] = []
+        page = 1
+        per_page = min(100, max(1, limit))
+        base_params = dict(params or {})
+        while len(results) < limit:
+            page_params = {**base_params, "per_page": per_page, "page": page}
+            data = self.get(path, params=page_params)
+            if not data:
+                break
+            if not isinstance(data, list):
+                break
+            results.extend(data)
+            if len(data) < per_page:
+                break
+            page += 1
+            if page > 40:
+                break
+        return results[:limit]
+
     def get_rate_limit(self) -> dict[str, Any]:
         """Return core rate-limit snapshot from /rate_limit."""
         try:
@@ -161,54 +182,49 @@ class GitHubClient:
     def get_repo(self, owner: str, repo: str) -> Optional[dict]:
         return self.get(f"/repos/{owner}/{repo}")
 
-    def get_forks(self, owner: str, repo: str, limit: int = 5) -> list[dict]:
-        data = self.get(
+    def get_forks(self, owner: str, repo: str, limit: int = 15) -> list[dict]:
+        return self._paginate(
             f"/repos/{owner}/{repo}/forks",
-            params={"per_page": min(limit, 30), "sort": "stargazers"},
+            {"sort": "stargazers"},
+            limit,
         )
-        return (data or [])[:limit]
 
     def get_contributors(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
-        data = self.get(
+        return self._paginate(
             f"/repos/{owner}/{repo}/contributors",
-            params={"per_page": min(limit, 100), "anon": "false"},
+            {"anon": "false"},
+            limit,
         )
-        return data or []
 
-    def get_commits(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
-        data = self.get(
-            f"/repos/{owner}/{repo}/commits",
-            params={"per_page": min(limit, 100)},
-        )
-        return data or []
+    def get_commits(self, owner: str, repo: str, limit: int = 300) -> list[dict]:
+        return self._paginate(f"/repos/{owner}/{repo}/commits", {}, limit)
 
-    def get_issues(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
-        data = self.get(
+    def get_issues(self, owner: str, repo: str, limit: int = 200) -> list[dict]:
+        return self._paginate(
             f"/repos/{owner}/{repo}/issues",
-            params={"state": "all", "per_page": min(limit, 100)},
+            {"state": "all"},
+            limit,
         )
-        return data or []
 
     def get_labeled_issues(
-        self, owner: str, repo: str, label: str, limit: int = 30
+        self, owner: str, repo: str, label: str, limit: int = 50
     ) -> list[dict]:
         """Fetch open issues with a specific label (e.g. good first issue)."""
-        data = self.get(
+        return self._paginate(
             f"/repos/{owner}/{repo}/issues",
-            params={
-                "state": "open",
-                "labels": label,
-                "per_page": min(limit, 100),
-            },
+            {"state": "open", "labels": label},
+            limit,
         )
-        return data or []
 
-    def get_pulls(self, owner: str, repo: str, limit: int = 50) -> list[dict]:
-        data = self.get(
+    def get_pulls(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
+        return self._paginate(
             f"/repos/{owner}/{repo}/pulls",
-            params={"state": "all", "per_page": min(limit, 100)},
+            {"state": "all"},
+            limit,
         )
-        return data or []
+
+    def get_pull(self, owner: str, repo: str, number: int) -> Optional[dict]:
+        return self.get(f"/repos/{owner}/{repo}/pulls/{number}")
 
     def get_languages(self, owner: str, repo: str) -> dict[str, int]:
         data = self.get(f"/repos/{owner}/{repo}/languages")
@@ -258,4 +274,24 @@ DEFAULT_SEED_REPOS = [
     "postgres/postgres",
     "git/git",
     "ohmyzsh/ohmyzsh",
+    "facebook/react-native",
+    "vuejs/vue",
+    "sveltejs/svelte",
+    "denoland/deno",
+    "microsoft/PowerToys",
+    "hashicorp/terraform",
+    "ansible/ansible",
+    "elastic/elasticsearch",
+    "apache/spark",
+    "huggingface/transformers",
+    "openai/openai-python",
+    "langchain-ai/langchain",
+    "obsidianmd/obsidian-releases",
+    "godotengine/godot",
+    "bitcoin/bitcoin",
+    "electron/electron",
+    "tailwindlabs/tailwindcss",
+    "storybookjs/storybook",
+    "nestjs/nest",
+    "spring-projects/spring-boot",
 ]

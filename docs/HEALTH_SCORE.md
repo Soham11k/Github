@@ -4,13 +4,24 @@ Implemented in `sp_refresh_health_scores` and exposed factor-by-factor in `v_hea
 
 ## Ingest sample window (important)
 
-Live GitHub sync stores approximately the **latest 100 commits, 100 issues, and 50 PRs** per repository (see `backend/app/services/ingest.py`). Mega-repos (e.g. `kubernetes/kubernetes`) therefore under-count commit velocity in the sample.
+Live GitHub sync paginates list endpoints up to configurable caps (defaults in `.env.example`):
 
-To avoid false “dead project” scores:
+| Resource | Default cap | Env var |
+|----------|-------------|---------|
+| Commits | 300 | `INGEST_COMMIT_LIMIT` |
+| Issues | 200 | `INGEST_ISSUE_LIMIT` |
+| Pull requests | 100 | `INGEST_PR_LIMIT` |
+| PR detail (churn) | 20 | `INGEST_PR_DETAIL_LIMIT` |
+| Child forks | 15 | `INGEST_FORK_LIMIT` |
+| Contributors | 100 | `INGEST_CONTRIBUTOR_LIMIT` |
+| Labeled beginner issues | 50 / label | `INGEST_LABELED_ISSUE_LIMIT` |
+
+Mega-repos can still under-count relative to full history. To avoid false “dead project” scores:
 
 - **Commit velocity** uses a **pushed_at floor** when sampled `commits_90d = 0` but GitHub reports a recent push.
 - **Recency** is weighted more heavily and always uses GitHub `pushed_at` (not the commit sample).
 - **Abandoned** (`sp_mark_abandoned_repos`) is driven primarily by `pushed_at` / recent sampled commits — a recent push clears abandonment even if the sample has few commits.
+- **PR churn** (`additions` / `deletions` / `changed_files`) is filled via detail fetches for the first N PRs (list endpoint omits them).
 
 | Factor | Range | Rule |
 |---|---|---|

@@ -118,6 +118,7 @@ export default function Repositories() {
               <Select.Option value="active">Active</Select.Option>
               <Select.Option value="beginner">Beginner-friendly</Select.Option>
               <Select.Option value="abandoned">Unmaintained</Select.Option>
+              <Select.Option value="stubs">Fork stubs only</Select.Option>
             </Select>
           </FormControl>
           <Button variant="primary" onClick={() => load()} style={{ width: '100%' }}>

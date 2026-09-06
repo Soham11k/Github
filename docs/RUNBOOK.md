@@ -17,9 +17,32 @@
 ```
 
 UI ingest: http://127.0.0.1:5173/ingest (admin token default `changeme` — **local demo only**; status shows token OK, login, and API quota).
+Presets, **Surprise me**, and **Refresh analytics** are on the Ingest page.
 
 Full Docker stack: `docker compose up --build` → UI http://localhost:8080  
-(DB not published on host 5432 by default; API live-ingests when `GITHUB_TOKEN` set and tables empty.)
+(DB not published on host 5432 by default; API live-ingests up to **50** seed repos when `GITHUB_TOKEN` set and tables empty.)
+
+## Nightly re-sync
+
+```bash
+./scripts/resync_full.sh          # re-ingest all sync_depth=full repos (LIMIT=50 default)
+LIMIT=30 ./scripts/resync_full.sh
+```
+
+Cron example (daily 03:15):
+
+```cron
+15 3 * * * cd /path/to/Project && ./scripts/resync_full.sh >> /tmp/osint-resync.log 2>&1
+```
+
+## Demo snapshots
+
+```bash
+./scripts/snapshot_db.sh                         # writes snapshots/*.dump
+./scripts/restore_snapshot.sh snapshots/foo.dump # restore into Docker or local DB
+```
+
+Keep dump files out of git (`snapshots/` is ignored).
 
 ## Credentials (course / local only)
 

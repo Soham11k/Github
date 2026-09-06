@@ -197,6 +197,66 @@ def fork_tree(repo_id: int) -> dict[str, Any]:
     return {"repo_id": repo_id, "nodes": nodes}
 
 
+@router.get("/repos/{repo_id}/commit-ancestry")
+def commit_ancestry(
+    repo_id: int,
+    sha: Optional[str] = None,
+    max_depth: int = Query(25, ge=1, le=100),
+) -> dict[str, Any]:
+    exists = fetch_one("SELECT repo_id FROM repositories WHERE repo_id = %s", (repo_id,))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    start_sha = sha
+    if not start_sha:
+        latest = fetch_one(
+            """
+            SELECT sha FROM commits
+            WHERE repo_id = %s
+            ORDER BY committed_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            (repo_id,),
+        )
+        if not latest:
+            return {"repo_id": repo_id, "sha": None, "nodes": []}
+        start_sha = latest["sha"]
+    nodes = fetch_all(
+        "SELECT * FROM fn_commit_ancestry(%s, %s, %s)",
+        (repo_id, start_sha, max_depth),
+    )
+    return {"repo_id": repo_id, "sha": start_sha, "nodes": nodes}
+
+
+@router.post("/repos/{repo_id}/sync")
+def sync_one_repo(
+    repo_id: int,
+    background_tasks: BackgroundTasks,
+    x_admin_token: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Fully sync one repository (e.g. promote a fork stub)."""
+    settings = get_settings()
+    if x_admin_token != settings.admin_token:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    row = fetch_one(
+        "SELECT owner_login, name, full_name FROM repositories WHERE repo_id = %s",
+        (repo_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    full_name = row["full_name"]
+    started = create_ingest_run(
+        query=None,
+        limit=1,
+        repos=[full_name],
+        use_seed=False,
+    )
+    background_tasks.add_task(execute_ingest_run, started["sync_id"], started["targets"])
+    return {
+        **started,
+        "message": f"Sync started for {full_name}; poll GET /api/sync-runs/{started['sync_id']}",
+    }
+
+
 @router.get("/repos/{repo_id}/health-factors")
 def health_factors(repo_id: int) -> dict[str, Any]:
     row = fetch_one("SELECT * FROM v_health_factors WHERE repo_id = %s", (repo_id,))
@@ -315,16 +375,46 @@ def list_languages() -> dict[str, Any]:
 
 
 @router.get("/beginner-friendly")
-def beginner_friendly(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+def beginner_friendly(
+    limit: int = Query(50, ge=1, le=200),
+    language: Optional[str] = None,
+) -> dict[str, Any]:
+    clauses = ["1=1"]
+    params: dict[str, Any] = {"limit": limit}
+    if language:
+        clauses.append("language_primary ILIKE %(language)s")
+        params["language"] = language
+    where = " AND ".join(clauses)
     items = fetch_all(
-        """
+        f"""
         SELECT *
         FROM v_beginner_friendly
+        WHERE {where}
         ORDER BY beginner_label_count DESC, health_score DESC
-        LIMIT %s
+        LIMIT %(limit)s
         """,
-        (limit,),
+        params,
     )
+    # Attach up to 5 open beginner-labeled issues per repo
+    for item in items:
+        samples = fetch_all(
+            """
+            SELECT i.issue_id, i.number, i.title, i.html_url, i.state
+            FROM issues i
+            JOIN issue_labels il ON il.issue_id = i.issue_id
+            WHERE i.repo_id = %s
+              AND NOT i.is_pull_request
+              AND i.state = 'open'
+              AND LOWER(il.label) IN (
+                    'good first issue', 'good-first-issue',
+                    'help wanted', 'help-wanted', 'beginner', 'easy'
+              )
+            ORDER BY i.updated_at DESC NULLS LAST
+            LIMIT 5
+            """,
+            (item["repo_id"],),
+        )
+        item["sample_issues"] = samples
     return {"items": items}
 
 
@@ -413,11 +503,23 @@ def trigger_ingest(
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
     body = payload or {}
+    mode = (body.get("mode") or "").strip().lower()
+    query = body.get("query")
+    limit = int(body.get("limit") or 10)
+    repos = body.get("repos")
+    use_seed = bool(body.get("use_seed", True))
+
+    if mode == "surprise":
+        query = "stars:>20000"
+        limit = 5
+        repos = None
+        use_seed = False
+
     started = create_ingest_run(
-        query=body.get("query"),
-        limit=int(body.get("limit") or 10),
-        repos=body.get("repos"),
-        use_seed=bool(body.get("use_seed", True)),
+        query=query,
+        limit=limit,
+        repos=repos,
+        use_seed=use_seed,
     )
     background_tasks.add_task(execute_ingest_run, started["sync_id"], started["targets"])
     return {
@@ -427,7 +529,9 @@ def trigger_ingest(
 
 
 @router.post("/analytics/refresh")
-def refresh_analytics(x_admin_token: Optional[str] = Header(default=None)) -> dict[str, str]:
+def refresh_analytics_endpoint(
+    x_admin_token: Optional[str] = Header(default=None),
+) -> dict[str, str]:
     settings = get_settings()
     if x_admin_token != settings.admin_token:
         raise HTTPException(status_code=401, detail="Invalid admin token")

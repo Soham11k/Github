@@ -27,3 +27,7 @@ frontend/dist/
 # macOS USB / AppleDouble junk
 ._*
 **/._*
+
+# DB demo dumps
+snapshots/
+*.dump

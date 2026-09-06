@@ -153,6 +153,7 @@ END;
 $$;
 
 -- Recursive CTE: fork lineage for a repository
+DROP FUNCTION IF EXISTS fn_repo_fork_tree(BIGINT);
 CREATE OR REPLACE FUNCTION fn_repo_fork_tree(p_repo_id BIGINT)
 RETURNS TABLE (
     repo_id BIGINT,
@@ -160,7 +161,8 @@ RETURNS TABLE (
     parent_repo_id BIGINT,
     depth INTEGER,
     stars INTEGER,
-    health_score NUMERIC
+    health_score NUMERIC,
+    sync_depth VARCHAR
 )
 LANGUAGE sql
 STABLE
@@ -172,7 +174,8 @@ AS $$
             r.parent_repo_id,
             0 AS depth,
             r.stars,
-            r.health_score
+            r.health_score,
+            COALESCE(r.sync_depth, 'full') AS sync_depth
         FROM repositories r
         WHERE r.repo_id = p_repo_id
 
@@ -184,7 +187,8 @@ AS $$
             child.parent_repo_id,
             ft.depth + 1,
             child.stars,
-            child.health_score
+            child.health_score,
+            COALESCE(child.sync_depth, 'full')
         FROM repositories child
         JOIN fork_tree ft ON child.parent_repo_id = ft.repo_id
         WHERE ft.depth < 20

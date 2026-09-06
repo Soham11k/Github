@@ -34,8 +34,8 @@ with psycopg.connect(url) as conn:
 PY
 )"
   if [[ "${COUNT:-0}" -eq 0 ]]; then
-    echo "==> Empty DB + GITHUB_TOKEN — live ingest (seed list, limit 8)…"
-    python -m app.ingest --seed --limit 8 || echo "WARNING: live ingest failed; continuing with existing/seed data"
+    echo "==> Empty DB + GITHUB_TOKEN — live ingest (seed list, limit 50)…"
+    python -m app.ingest --seed --limit 50 || echo "WARNING: live ingest failed; continuing with existing/seed data"
   else
     echo "==> Database already has ${COUNT} repos — skipping bootstrap ingest"
   fi

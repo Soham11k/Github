@@ -15,6 +15,7 @@ import {
 } from '@primer/react'
 import {
   GitBranchIcon,
+  GitCommitIcon,
   GitPullRequestIcon,
   GraphIcon,
   IssueOpenedIcon,
@@ -23,6 +24,7 @@ import {
   PeopleIcon,
   RepoIcon,
   StarIcon,
+  SyncIcon,
 } from '@primer/octicons-react'
 import { api } from '../api'
 import HealthMeter from '../components/HealthMeter'
@@ -36,6 +38,7 @@ const TABS = [
   { id: 'issues', label: 'Issues', icon: IssueOpenedIcon },
   { id: 'pulls', label: 'Pull requests', icon: GitPullRequestIcon },
   { id: 'insights', label: 'Insights', icon: GraphIcon },
+  { id: 'ancestry', label: 'Ancestry', icon: GitCommitIcon },
   { id: 'forks', label: 'Forks', icon: GitBranchIcon },
 ]
 
@@ -45,9 +48,11 @@ export default function RepoDetail() {
   const [forks, setForks] = useState([])
   const [factors, setFactors] = useState(null)
   const [monthly, setMonthly] = useState([])
+  const [ancestry, setAncestry] = useState({ sha: null, nodes: [] })
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [syncingFork, setSyncingFork] = useState(null)
 
   useEffect(() => {
     setLoading(true)
@@ -56,12 +61,14 @@ export default function RepoDetail() {
       api.forkTree(id),
       api.healthFactors(id),
       api.activityMonthly(id),
+      api.commitAncestry(id),
     ])
-      .then(([repoData, forkData, factorData, monthData]) => {
+      .then(([repoData, forkData, factorData, monthData, ancestryData]) => {
         setData(repoData)
         setForks(forkData.nodes || [])
         setFactors(factorData.item || null)
         setMonthly(monthData.items || [])
+        setAncestry(ancestryData || { sha: null, nodes: [] })
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -73,6 +80,19 @@ export default function RepoDetail() {
 
   const { repo, languages, contributors, issues, pull_requests: pulls, report } = data
   const [owner, name] = (repo.full_name || '/').split('/')
+
+  async function syncForkFully(forkId) {
+    const token = sessionStorage.getItem('osint_admin_token') || 'changeme'
+    setSyncingFork(forkId)
+    setError('')
+    try {
+      await api.syncRepo(forkId, token)
+    } catch (e) {
+      setError(e.message || String(e))
+    } finally {
+      setSyncingFork(null)
+    }
+  }
 
   return (
     <div className="page repo-page">
@@ -286,7 +306,45 @@ export default function RepoDetail() {
                   </table>
                 </div>
               )}
+              <Heading as="h3" className="h4" style={{ marginTop: '1.25rem' }}>SQL report</Heading>
+              <Text as="p" className="muted">From <code>fn_generate_repo_report</code></Text>
               <pre className="report-json">{JSON.stringify(report || {}, null, 2)}</pre>
+            </section>
+          )}
+
+          {tab === 'ancestry' && (
+            <section className="panel">
+              <Heading as="h2" className="h3">Commit ancestry</Heading>
+              <Text as="p" className="muted">
+                Recursive CTE <code>fn_commit_ancestry</code>
+                {ancestry.sha ? (
+                  <> starting at <span className="ancestry-sha">{String(ancestry.sha).slice(0, 12)}</span></>
+                ) : null}
+              </Text>
+              {!ancestry.nodes?.length ? (
+                <EmptyState title="No commits sampled" icon={GitCommitIcon} description="Re-ingest this repository to load commits." />
+              ) : (
+                <table className="people-table">
+                  <thead>
+                    <tr>
+                      <th>Depth</th>
+                      <th>SHA</th>
+                      <th>When</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ancestry.nodes.map((n) => (
+                      <tr key={`${n.depth}-${n.sha}`}>
+                        <td>{n.depth}</td>
+                        <td className="ancestry-sha">{String(n.sha).slice(0, 10)}</td>
+                        <td className="muted">{relativeTime(n.committed_at) || '—'}</td>
+                        <td>{(n.message || '').split('\n')[0].slice(0, 80)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </section>
           )}
 
@@ -311,8 +369,27 @@ export default function RepoDetail() {
                       <Link as={RouterLink} to={`/repos/${n.repo_id}`}>
                         {n.full_name}
                       </Link>
+                      {n.sync_depth === 'stub' && (
+                        <Label size="small" variant="attention" sx={{ ml: 1 }}>stub</Label>
+                      )}
                       <TreeView.TrailingVisual>
-                        <span className="muted">depth {n.depth} · ★ {compactNumber(n.stars)}</span>
+                        <span className="muted" style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
+                          depth {n.depth} · ★ {compactNumber(n.stars)}
+                          {n.sync_depth === 'stub' && n.repo_id !== repo.repo_id && (
+                            <Button
+                              size="small"
+                              leadingVisual={SyncIcon}
+                              disabled={syncingFork === n.repo_id}
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                syncForkFully(n.repo_id)
+                              }}
+                            >
+                              {syncingFork === n.repo_id ? 'Syncing…' : 'Sync fully'}
+                            </Button>
+                          )}
+                        </span>
                       </TreeView.TrailingVisual>
                     </TreeView.Item>
                   ))}

@@ -54,6 +54,21 @@ export default function Compare() {
   }, [params])
 
   useEffect(() => {
+    if (ids.length) return
+    let cancelled = false
+    api.repos({ sort: 'health', limit: 3 })
+      .then((d) => {
+        if (cancelled) return
+        const top = (d.items || []).map((r) => r.repo_id).filter(Boolean)
+        if (top.length) {
+          setParams({ ids: top.join(',') }, { replace: true })
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [ids.length, setParams])
+
+  useEffect(() => {
     if (!ids.length) {
       setItems([])
       return
@@ -117,8 +132,8 @@ export default function Compare() {
 
       {!ids.length && (
         <EmptyState
-          title="No repositories selected"
-          description="Go to Repositories, check up to 3 repos, then open Compare — or visit /compare?ids=920001,920004"
+          title="Picking top repos by health…"
+          description="Compare auto-loads the healthiest repositories when none are selected. Or choose up to 3 on Repositories."
           icon={GitCompareIcon}
         />
       )}

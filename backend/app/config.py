@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     github_api_base: str = "https://api.github.com"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Per-repo ingest sample caps (GitHub list endpoints are paginated up to these)
+    ingest_commit_limit: int = 300
+    ingest_issue_limit: int = 200
+    ingest_pr_limit: int = 100
+    ingest_fork_limit: int = 15
+    ingest_pr_detail_limit: int = 20
+    ingest_contributor_limit: int = 100
+    ingest_labeled_issue_limit: int = 50
+
 
 @lru_cache
 def get_settings() -> Settings:
