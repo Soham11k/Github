@@ -17,6 +17,17 @@ source "$ROOT/scripts/load_env.sh"
 load_dotenv "$ROOT/.env"
 
 DATABASE_URL="${DATABASE_URL:-postgresql://osint:osint@localhost:5432/github_osint}"
+# Local start always needs a reachable Postgres. Keep cloud URI in .env for deploy,
+# but point the API at localhost unless USE_REMOTE_DB=1.
+if [[ "$DATABASE_URL" != *"localhost"* && "$DATABASE_URL" != *"127.0.0.1"* ]]; then
+  if [[ "${USE_REMOTE_DB:-}" == "1" ]]; then
+    echo "    Using remote DATABASE_URL (USE_REMOTE_DB=1)."
+  else
+    echo "    .env DATABASE_URL is remote; local start uses localhost Postgres."
+    echo "    (Set USE_REMOTE_DB=1 to force the remote URL for the API.)"
+    DATABASE_URL="postgresql://osint:osint@localhost:5432/github_osint"
+  fi
+fi
 export DATABASE_URL
 cp "$ROOT/.env" "$ROOT/backend/.env"
 
@@ -70,34 +81,43 @@ fi
 ln -sfn "$VENV_DIR" "$ROOT/backend/.venv"
 
 REPO_COUNT="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
-if [[ "${REPO_COUNT:-0}" -eq 0 ]]; then
-  TOKEN_TRIMMED="$(echo -n "${GITHUB_TOKEN:-}" | tr -d '[:space:]')"
-  if [[ -n "$TOKEN_TRIMMED" ]]; then
-    echo "==> Empty database — live ingest from GitHub (seed list, limit 12)…"
-    INGEST_OUT="$RUN_DIR/bootstrap_ingest.json"
-    set +e
-    (
-      cd "$ROOT/backend"
-      "$VENV_DIR/bin/python" -m app.ingest --seed --limit 12
-    ) >"$INGEST_OUT" 2>"$RUN_DIR/bootstrap_ingest.log"
-    INGEST_RC=$?
-    set -e
-    if [[ -f "$INGEST_OUT" ]]; then
-      echo "    Ingest result:"
-      cat "$INGEST_OUT" || true
-    fi
-    SYNCED="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
-    if [[ "$INGEST_RC" -ne 0 || "${SYNCED:-0}" -eq 0 ]]; then
-      echo "ERROR: Live GitHub ingest failed or synced 0 repos."
-      echo "       Check GITHUB_TOKEN in .env (expired/invalid?) and $RUN_DIR/bootstrap_ingest.log"
-      tail -40 "$RUN_DIR/bootstrap_ingest.log" || true
-      exit 1
-    fi
-    echo "    Synced $SYNCED repositories from GitHub."
-  else
-    echo "==> Empty database — no GITHUB_TOKEN; loading offline demo seed…"
-    psql -h localhost -d github_osint -v ON_ERROR_STOP=1 -f "$ROOT/sql/seed_demo.sql" >/dev/null
+DEMO_COUNT="$(psql -h localhost -d github_osint -Atc "
+  SELECT COUNT(*)::INT FROM repositories
+  WHERE repo_id BETWEEN 920001 AND 920099
+     OR owner_login IN ('demo-org', 'acme-labs', 'northwind-oss', 'alice-dev', 'diego-go');
+" 2>/dev/null || echo 0)"
+TOKEN_TRIMMED="$(echo -n "${GITHUB_TOKEN:-}" | tr -d '[:space:]')"
+
+# Live bootstrap when empty, or when the only rows are the offline demo seed
+if [[ -n "$TOKEN_TRIMMED" ]] && { [[ "${REPO_COUNT:-0}" -eq 0 ]] || { [[ "${DEMO_COUNT:-0}" -gt 0 ]] && [[ "${DEMO_COUNT}" -eq "${REPO_COUNT}" ]]; }; }; then
+  if [[ "${DEMO_COUNT:-0}" -gt 0 ]]; then
+    echo "==> Demo-only database — purging offline seed before live ingest…"
+    DATABASE_URL="postgresql://osint:osint@localhost:5432/github_osint" bash "$ROOT/scripts/purge_demo.sh"
   fi
+  echo "==> Live ingest from GitHub (showcase seed list, limit 12)…"
+  INGEST_OUT="$RUN_DIR/bootstrap_ingest.json"
+  set +e
+  (
+    cd "$ROOT/backend"
+    "$VENV_DIR/bin/python" -m app.ingest --seed --limit 12
+  ) >"$INGEST_OUT" 2>"$RUN_DIR/bootstrap_ingest.log"
+  INGEST_RC=$?
+  set -e
+  if [[ -f "$INGEST_OUT" ]]; then
+    echo "    Ingest result:"
+    cat "$INGEST_OUT" || true
+  fi
+  SYNCED="$(psql -h localhost -d github_osint -Atc "SELECT COUNT(*) FROM repositories;" 2>/dev/null || echo 0)"
+  if [[ "$INGEST_RC" -ne 0 || "${SYNCED:-0}" -eq 0 ]]; then
+    echo "ERROR: Live GitHub ingest failed or synced 0 repos."
+    echo "       Check GITHUB_TOKEN in .env (expired/invalid?) and $RUN_DIR/bootstrap_ingest.log"
+    tail -40 "$RUN_DIR/bootstrap_ingest.log" || true
+    exit 1
+  fi
+  echo "    Synced $SYNCED repositories from GitHub."
+elif [[ "${REPO_COUNT:-0}" -eq 0 ]]; then
+  echo "==> Empty database — no GITHUB_TOKEN; loading offline demo seed…"
+  psql -h localhost -d github_osint -v ON_ERROR_STOP=1 -f "$ROOT/sql/seed_demo.sql" >/dev/null
 fi
 psql -h localhost -d github_osint -f "$ROOT/sql/grants.sql" >/dev/null 2>&1 || true
 
@@ -111,6 +131,12 @@ cd "$ROOT/backend"
 nohup "$VENV_DIR/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 \
   >"$RUN_DIR/api.log" 2>&1 &
 echo $! >"$RUN_DIR/api.pid"
+
+echo "==> Starting worker (drain ingest requests)…"
+cd "$ROOT/backend"
+nohup "$VENV_DIR/bin/python" -m app.worker --loop \
+  >"$RUN_DIR/worker.log" 2>&1 &
+echo $! >"$RUN_DIR/worker.pid"
 
 echo "==> Starting UI on :5173…"
 cd "$ROOT/frontend"
@@ -145,6 +171,7 @@ echo "GitHub OSINT is running."
 echo "  UI:      http://127.0.0.1:5173/"
 echo "  API:     http://127.0.0.1:8000/docs"
 echo "  Ingest:  http://127.0.0.1:5173/ingest"
+echo "  Worker:  draining /requests queue (see .run/worker.log)"
 echo "  Stop:    ./scripts/stop.sh"
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo ""

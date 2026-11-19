@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /ingest
+Disallow: /watchlist
+Disallow: /requests
+Disallow: /alerts
+
+Sitemap: /sitemap.xml

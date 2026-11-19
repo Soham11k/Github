@@ -1,6 +1,9 @@
 -- Analytics views using joins and window functions
 
 DROP VIEW IF EXISTS v_beginner_friendly CASCADE;
+DROP VIEW IF EXISTS v_inactive_repos CASCADE;
+DROP VIEW IF EXISTS v_contributor_rankings CASCADE;
+DROP VIEW IF EXISTS v_language_popularity CASCADE;
 DROP VIEW IF EXISTS v_repo_health CASCADE;
 
 -- Repository health breakdown + composite score context
@@ -239,6 +242,10 @@ WHERE COALESCE(r.sync_depth, 'full') = 'full'
 ORDER BY days_since_push DESC NULLS LAST;
 
 -- Dashboard summary helpers
+DROP VIEW IF EXISTS v_health_distribution CASCADE;
+DROP VIEW IF EXISTS v_repo_health_position CASCADE;
+DROP VIEW IF EXISTS v_repo_issue_flow CASCADE;
+DROP VIEW IF EXISTS v_repo_commit_heatmap CASCADE;
 DROP VIEW IF EXISTS v_sync_history CASCADE;
 DROP VIEW IF EXISTS v_org_analytics CASCADE;
 DROP VIEW IF EXISTS v_repo_monthly_activity CASCADE;
@@ -461,6 +468,100 @@ SELECT
     ) AS audit_events_during_run
 FROM sync_runs s
 ORDER BY s.started_at DESC;
+
+-- Commit punch card: weekday (ISO 1=Mon..7=Sun) × hour of day (UTC)
+CREATE OR REPLACE VIEW v_repo_commit_heatmap AS
+SELECT
+    c.repo_id,
+    EXTRACT(ISODOW FROM c.committed_at AT TIME ZONE 'UTC')::SMALLINT AS weekday,
+    EXTRACT(HOUR FROM c.committed_at AT TIME ZONE 'UTC')::SMALLINT AS hour_of_day,
+    COUNT(*)::BIGINT AS commit_count
+FROM commits c
+WHERE c.committed_at IS NOT NULL
+GROUP BY c.repo_id, weekday, hour_of_day;
+
+-- Monthly issue/PR flow with open backlog (created before month end, not closed by then)
+CREATE OR REPLACE VIEW v_repo_issue_flow AS
+WITH months AS (
+    SELECT
+        r.repo_id,
+        r.full_name,
+        gs.month_start,
+        (gs.month_start + INTERVAL '1 month') AS month_end
+    FROM repositories r
+    CROSS JOIN LATERAL generate_series(
+        DATE_TRUNC('month', NOW() - INTERVAL '11 months'),
+        DATE_TRUNC('month', NOW()),
+        INTERVAL '1 month'
+    ) AS gs(month_start)
+    WHERE COALESCE(r.sync_depth, 'full') = 'full'
+)
+SELECT
+    m.repo_id,
+    m.full_name,
+    m.month_start::DATE AS activity_month,
+    COALESCE(iss.issues_opened, 0) AS issues_opened,
+    COALESCE(iss.issues_closed, 0) AS issues_closed,
+    COALESCE(iss.open_issue_backlog, 0) AS open_issue_backlog,
+    COALESCE(pr.prs_opened, 0) AS prs_opened,
+    COALESCE(pr.prs_merged, 0) AS prs_merged
+FROM months m
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) FILTER (
+            WHERE NOT i.is_pull_request
+              AND DATE_TRUNC('month', i.created_at) = m.month_start
+        ) AS issues_opened,
+        COUNT(*) FILTER (
+            WHERE NOT i.is_pull_request
+              AND i.closed_at IS NOT NULL
+              AND DATE_TRUNC('month', i.closed_at) = m.month_start
+        ) AS issues_closed,
+        COUNT(*) FILTER (
+            WHERE NOT i.is_pull_request
+              AND i.created_at < m.month_end
+              AND (i.closed_at IS NULL OR i.closed_at >= m.month_end)
+        ) AS open_issue_backlog
+    FROM issues i
+    WHERE i.repo_id = m.repo_id
+) iss ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) FILTER (
+            WHERE DATE_TRUNC('month', p.created_at) = m.month_start
+        ) AS prs_opened,
+        COUNT(*) FILTER (
+            WHERE p.is_merged
+              AND p.merged_at IS NOT NULL
+              AND DATE_TRUNC('month', p.merged_at) = m.month_start
+        ) AS prs_merged
+    FROM pull_requests p
+    WHERE p.repo_id = m.repo_id
+) pr ON TRUE
+ORDER BY m.repo_id, activity_month;
+
+-- Per-repo health bucket + percentile among full-depth repos
+CREATE OR REPLACE VIEW v_repo_health_position AS
+SELECT
+    r.repo_id,
+    r.full_name,
+    r.health_score,
+    LEAST(GREATEST(WIDTH_BUCKET(r.health_score, 0, 100, 10), 1), 10) AS health_bucket,
+    PERCENT_RANK() OVER (ORDER BY r.health_score) AS health_percentile
+FROM repositories r
+WHERE COALESCE(r.sync_depth, 'full') = 'full';
+
+-- Health score histogram (10 buckets of width 10); empty buckets return 0
+CREATE OR REPLACE VIEW v_health_distribution AS
+SELECT
+    b.bucket AS health_bucket,
+    (b.bucket - 1) * 10 AS bucket_low,
+    b.bucket * 10 AS bucket_high,
+    COALESCE(COUNT(p.repo_id), 0)::BIGINT AS repo_count
+FROM generate_series(1, 10) AS b(bucket)
+LEFT JOIN v_repo_health_position p ON p.health_bucket = b.bucket
+GROUP BY b.bucket
+ORDER BY b.bucket;
 
 -- Materialized health summary (refreshed by sp_refresh_analytics)
 DROP MATERIALIZED VIEW IF EXISTS mv_repo_health_summary;

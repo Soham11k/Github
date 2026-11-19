@@ -10,11 +10,15 @@ import {
 } from '@primer/react'
 import { FilterIcon, SearchIcon } from '@primer/octicons-react'
 import { api } from '../api'
+import { useAuth } from '../auth/AuthContext'
 import RepoListItem from '../components/RepoListItem'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
 import { compactNumber, healthLabel } from '../lib/format'
+import { usePageTitle } from '../lib/pageTitle'
 
 export default function Repositories() {
+  usePageTitle('Repositories')
+  const { user } = useAuth()
   const [params, setParams] = useSearchParams()
   const [items, setItems] = useState([])
   const [total, setTotal] = useState(0)
@@ -150,7 +154,27 @@ export default function Repositories() {
           ) : items.length === 0 ? (
             <EmptyState
               title="No repositories matched"
-              description="Try a different language, clear filters, or ingest more repos."
+              description={
+                q.includes('/')
+                  ? `We don't have ${q} yet. Signed-in users can request it for ingest.`
+                  : 'Try a different language, clear filters, or request a repo.'
+              }
+              action={
+                q.includes('/') ? (
+                  <Button
+                    as={RouterLink}
+                    to={user ? `/requests` : '/requests'}
+                    state={{ prefill: q }}
+                    variant="primary"
+                    sx={{ mt: 2 }}
+                    onClick={() => {
+                      if (user) sessionStorage.setItem('reposcope_request_prefill', q)
+                    }}
+                  >
+                    Request this repo
+                  </Button>
+                ) : null
+              }
             />
           ) : (
             <div className="repo-list">

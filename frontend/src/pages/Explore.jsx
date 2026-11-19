@@ -12,7 +12,6 @@ import {
   AlertIcon,
   FlameIcon,
   LightBulbIcon,
-  MarkGithubIcon,
   OrganizationIcon,
   PeopleIcon,
   RepoIcon,
@@ -20,10 +19,15 @@ import {
   SyncIcon,
 } from '@primer/octicons-react'
 import { api } from '../api'
+import BrandMark from '../components/BrandMark'
+import { ShareDoughnut, Sparkline } from '../components/MarketCharts'
 import RepoListItem from '../components/RepoListItem'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
+import { APP_NAME, APP_TAGLINE } from '../brand'
+import { useAuth } from '../auth/AuthContext'
 import { compactNumber } from '../lib/format'
 import { languageColor } from '../lib/languageColors'
+import { usePageTitle } from '../lib/pageTitle'
 
 function KpiCard({ icon: Icon, label, value, to, tone }) {
   return (
@@ -38,6 +42,8 @@ function KpiCard({ icon: Icon, label, value, to, tone }) {
 }
 
 export default function Explore() {
+  usePageTitle('Explore')
+  const { isAdmin } = useAuth()
   const [data, setData] = useState(null)
   const [beginner, setBeginner] = useState([])
   const [inactive, setInactive] = useState([])
@@ -47,9 +53,12 @@ export default function Explore() {
   useEffect(() => {
     Promise.all([api.dashboard(), api.beginner(6), api.inactive(4)])
       .then(([dash, beg, ina]) => {
+        if (!dash || typeof dash !== 'object' || !dash.kpis) {
+          throw new Error('Repository data is unavailable because the API is not connected.')
+        }
         setData(dash)
-        setBeginner(beg.items || [])
-        setInactive(ina.items || [])
+        setBeginner(Array.isArray(beg?.items) ? beg.items : [])
+        setInactive(Array.isArray(ina?.items) ? ina.items : [])
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -63,15 +72,22 @@ export default function Explore() {
         title="No marketplace data yet"
         description="Pull real GitHub repos to fill Explore, Insights, and rankings."
         action={
-          <Button as={RouterLink} to="/ingest" variant="primary" sx={{ mt: 2 }}>
-            Go to Ingest
-          </Button>
+          isAdmin ? (
+            <Button as={RouterLink} to="/ingest" variant="primary" sx={{ mt: 2 }}>
+              Go to Ingest
+            </Button>
+          ) : (
+            <Button as={RouterLink} to="/requests" variant="primary" sx={{ mt: 2 }}>
+              Request a repository
+            </Button>
+          )
         }
       />
     )
   }
 
-  const { kpis, languages, top_repos: topRepos, top_orgs: topOrgs, recent_syncs: recentSyncs } = data
+  const kpis = data.kpis || {}
+  const { languages, top_repos: topRepos, top_orgs: topOrgs, recent_syncs: recentSyncs } = data
   const emptyMarket = !kpis?.repo_count
 
   return (
@@ -79,14 +95,14 @@ export default function Explore() {
       <section className="explore-hero">
         <div className="explore-hero-copy">
           <div className="explore-eyebrow">
-            <MarkGithubIcon size={16} /> Open Source Intelligence
+            <BrandMark size={16} /> {APP_NAME} · {APP_TAGLINE}
           </div>
           <Heading as="h1" className="explore-title">
-            Explore the global open-source market
+            {APP_NAME}
           </Heading>
           <Text as="p" className="explore-lead">
             Discover healthy repositories, beginner-friendly projects, and rising languages —
-            the same surface you know from GitHub, powered by advanced SQL analytics.
+            powered by PostgreSQL analytics on public GitHub data.
           </Text>
           <div className="explore-actions">
             <Button as={RouterLink} to="/repos" variant="primary">
@@ -95,9 +111,14 @@ export default function Explore() {
             <Button as={RouterLink} to="/beginner">
               Find good first issues
             </Button>
-            {emptyMarket && (
+            {emptyMarket && isAdmin && (
               <Button as={RouterLink} to="/ingest" leadingVisual={SyncIcon}>
-                Ingest GitHub data
+                Ingest data
+              </Button>
+            )}
+            {emptyMarket && !isAdmin && (
+              <Button as={RouterLink} to="/requests">
+                Request a repository
               </Button>
             )}
           </div>
@@ -110,6 +131,14 @@ export default function Explore() {
             <li><FlameIcon /> <strong>{kpis.avg_health_score ?? '—'}</strong> average health score</li>
             <li><LightBulbIcon /> <strong>{compactNumber(kpis.beginner_friendly_count)}</strong> beginner-friendly</li>
           </ul>
+          {(data.activity || []).length > 0 && (
+            <div style={{ marginTop: '0.85rem' }}>
+              <Text as="p" className="muted" style={{ marginBottom: '0.35rem', fontSize: 12 }}>
+                Commits · last 90 days
+              </Text>
+              <Sparkline values={(data.activity || []).map((a) => a.commit_count)} />
+            </div>
+          )}
         </div>
       </section>
 
@@ -151,7 +180,14 @@ export default function Explore() {
               <Heading as="h2" className="h3">Topics by language</Heading>
               <Link as={RouterLink} to="/insights">Insights</Link>
             </div>
-            <div className="topic-chips">
+            <ShareDoughnut
+              items={(languages || []).slice(0, 8).map((l) => ({
+                label: l.language_name,
+                value: Number(l.repo_count) || 0,
+              }))}
+              emptyMessage="No languages indexed yet."
+            />
+            <div className="topic-chips" style={{ marginTop: '0.75rem' }}>
               {(languages || []).slice(0, 12).map((l) => (
                 <Link
                   key={l.language_name}

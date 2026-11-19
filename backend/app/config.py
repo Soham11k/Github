@@ -14,13 +14,35 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    app_env: str = "development"
+    app_name: str = "RepoPulse"
     database_url: str = "postgresql://osint:osint@localhost:5432/github_osint"
     github_token: str = ""
     admin_token: str = "changeme"
+    admin_github_logins: str = ""
     github_api_base: str = "https://api.github.com"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    # Per-repo ingest sample caps (GitHub list endpoints are paginated up to these)
+    # GitHub OAuth (public website)
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
+    frontend_url: str = "http://localhost:5173"
+    session_secret: str = "dev-session-secret-change-me"
+    session_cookie_name: str = "repopulse_session"
+    session_max_age_seconds: int = 60 * 60 * 24 * 30
+    cookie_secure: bool = False
+
+    # Public site / badges
+    public_api_url: str = "http://localhost:8000"
+    sentry_dsn: str = ""
+
+    # Rate limits
+    rate_limit_read: str = "120/minute"
+    rate_limit_write: str = "10/minute"
+
+    # Per-repo ingest sample window + caps (GitHub list endpoints are paginated up to these)
+    ingest_activity_days: int = 180
     ingest_commit_limit: int = 300
     ingest_issue_limit: int = 200
     ingest_pr_limit: int = 100
@@ -28,6 +50,18 @@ class Settings(BaseSettings):
     ingest_pr_detail_limit: int = 20
     ingest_contributor_limit: int = 100
     ingest_labeled_issue_limit: int = 50
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() == "production"
+
+    @property
+    def admin_logins(self) -> set[str]:
+        return {
+            x.strip().lower()
+            for x in self.admin_github_logins.split(",")
+            if x.strip()
+        }
 
 
 @lru_cache

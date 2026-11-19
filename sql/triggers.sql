@@ -5,6 +5,8 @@ RETURNS TRIGGER AS $$
 DECLARE
     rid TEXT;
     payload JSONB;
+    old_cmp JSONB;
+    new_cmp JSONB;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         payload := to_jsonb(OLD);
@@ -20,7 +22,6 @@ BEGIN
         RETURN OLD;
     END IF;
 
-    payload := to_jsonb(NEW);
     IF TG_TABLE_NAME = 'repositories' THEN
         rid := NEW.repo_id::TEXT;
     ELSIF TG_TABLE_NAME = 'commits' THEN
@@ -30,6 +31,14 @@ BEGIN
     END IF;
 
     IF TG_OP = 'UPDATE' THEN
+        -- Skip no-op / sync-only updates to avoid filling Neon storage on nightly re-ingest
+        old_cmp := to_jsonb(OLD) - 'synced_at' - 'last_full_sync_at' - 'last_activity_at'
+                   - 'health_score' - 'commit_count_cache' - 'contributor_count_cache';
+        new_cmp := to_jsonb(NEW) - 'synced_at' - 'last_full_sync_at' - 'last_activity_at'
+                   - 'health_score' - 'commit_count_cache' - 'contributor_count_cache';
+        IF old_cmp = new_cmp THEN
+            RETURN NEW;
+        END IF;
         INSERT INTO audit_log (table_name, record_id, action, details)
         VALUES (
             TG_TABLE_NAME,
@@ -40,6 +49,7 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    payload := to_jsonb(NEW);
     INSERT INTO audit_log (table_name, record_id, action, details)
     VALUES (TG_TABLE_NAME, rid, 'INSERT', payload);
     RETURN NEW;

@@ -24,6 +24,7 @@ kill_pidfile() {
 }
 
 kill_pidfile "$RUN_DIR/api.pid" "API"
+kill_pidfile "$RUN_DIR/worker.pid" "worker"
 kill_pidfile "$RUN_DIR/ui.pid" "UI"
 
 # Fallback: free ports if stale (vite orphans often survive npm kill)

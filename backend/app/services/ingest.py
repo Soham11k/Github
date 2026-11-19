@@ -240,13 +240,14 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                     repo_id, org_id, owner_login, name, full_name, description, html_url,
                     default_branch, language_primary, stars, forks_count, open_issues_count,
                     watchers_count, size_kb, is_fork, is_archived, parent_repo_id,
-                    sync_depth, created_at, updated_at, pushed_at, last_activity_at, synced_at
+                    sync_depth, created_at, updated_at, pushed_at, last_activity_at,
+                    synced_at, last_full_sync_at
                 ) VALUES (
                     %(repo_id)s, %(org_id)s, %(owner_login)s, %(name)s, %(full_name)s, %(description)s,
                     %(html_url)s, %(default_branch)s, %(language_primary)s, %(stars)s, %(forks)s,
                     %(open_issues)s, %(watchers)s, %(size_kb)s, %(is_fork)s, %(is_archived)s,
                     %(parent_repo_id)s, 'full', %(created_at)s, %(updated_at)s, %(pushed_at)s,
-                    %(pushed_at)s, NOW()
+                    %(pushed_at)s, NOW(), NOW()
                 )
                 ON CONFLICT (repo_id) DO UPDATE SET
                     org_id = EXCLUDED.org_id,
@@ -266,7 +267,8 @@ def sync_repository(conn: Connection, client: GitHubClient, owner: str, repo: st
                         COALESCE(repositories.last_activity_at, '-infinity'::timestamptz),
                         COALESCE(EXCLUDED.pushed_at, NOW())
                     ),
-                    synced_at = NOW()
+                    synced_at = NOW(),
+                    last_full_sync_at = NOW()
                 """,
                 {
                     "repo_id": repo_id,

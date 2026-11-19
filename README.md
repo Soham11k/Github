@@ -1,6 +1,12 @@
-# GitHub Open Source Intelligence Database
+# RepoPulse
 
-Advanced SQL analytics platform that collects public GitHub repository data via the GitHub REST API, stores it in a normalized **PostgreSQL** database, and exposes health scores, contributor rankings, language trends, and beginner-friendly discovery through a **FastAPI** backend and **React + Chart.js** dashboards.
+Open source repository intelligence: public GitHub data in **PostgreSQL**, a **FastAPI** API, and a **React + Primer** UI. Browse health scores, beginner-friendly issues, and org trends; sign in with GitHub to request repos, save a watchlist, and get in-app alerts.
+
+> Product name is configurable in `frontend/src/brand.js` and `APP_NAME`. Data from the GitHub API — not affiliated with GitHub.
+
+**Public deploy:**
+- [docs/SUPABASE_VERCEL.md](docs/SUPABASE_VERCEL.md) — **Vercel** (UI) + **Supabase** (Postgres) + **Render** (API)
+- [docs/DEPLOY.md](docs/DEPLOY.md) — Render + Neon (alternate)
 
 ## Architecture
 
@@ -72,11 +78,11 @@ docker compose up --build
 | http://localhost:8080/ | UI (nginx → API) |
 | http://localhost:8000/docs | API |
 
-First DB boot loads schema (+ optional offline SQL seed if mounted). If `GITHUB_TOKEN` is set and the DB still has **0** repos when `api` starts, the container **live-ingests** the seed list (limit **50**) before serving.
+The API image applies SQL via `python -m app.migrate` on start (no SQL bind-mounts into Postgres). If `GITHUB_TOKEN` is set and the DB still has **0** repos, the container **live-ingests** the seed list (limit **50**) before serving.
 
 Postgres is **not** published on host `:5432` by default (internal Docker network only). To expose it for host `psql`, uncomment the `ports` block under `db` in `docker-compose.yml`.
 
-**Local-only credentials:** `osint` / `osint`, `ADMIN_TOKEN=changeme`, and `osint_ro` / `osint_ro` (read-only). Change before any shared deploy.
+**Local-only credentials:** `osint` / `osint`, `ADMIN_TOKEN=changeme` (dev only). Production uses GitHub OAuth + `ADMIN_GITHUB_LOGINS`. For local read-only demos, run `sql/local_ro_login.sql` after migrate.
 
 ### Live ingest (UI)
 

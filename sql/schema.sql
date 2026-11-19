@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS repositories (
     -- 'full' = live ingest; 'stub' = lightweight fork/parent row for tree demos only
     sync_depth          VARCHAR(16) NOT NULL DEFAULT 'full',
     synced_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Written only by full sync_repository; procedures may bump synced_at without a full ingest
+    last_full_sync_at   TIMESTAMPTZ,
     CONSTRAINT uq_repo_owner_name UNIQUE (owner_login, name)
 );
 
@@ -145,6 +147,7 @@ ALTER TABLE pull_requests ALTER COLUMN deletions DROP DEFAULT;
 ALTER TABLE pull_requests ALTER COLUMN changed_files DROP DEFAULT;
 ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS repos_requested INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sync_depth VARCHAR(16) NOT NULL DEFAULT 'full';
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS last_full_sync_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS audit_log (
     audit_id        BIGSERIAL PRIMARY KEY,
@@ -154,3 +157,59 @@ CREATE TABLE IF NOT EXISTS audit_log (
     changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     details         JSONB
 );
+
+-- App accounts (GitHub OAuth), watchlists, ingest queue, alerts
+CREATE TABLE IF NOT EXISTS app_users (
+    user_id         BIGSERIAL PRIMARY KEY,
+    github_id       BIGINT NOT NULL UNIQUE,
+    login           VARCHAR(255) NOT NULL,
+    avatar_url      TEXT,
+    is_admin        BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    user_id                 BIGINT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    repo_id                 BIGINT NOT NULL REFERENCES repositories(repo_id) ON DELETE CASCADE,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_health        NUMERIC(5, 2),
+    last_seen_abandoned     BOOLEAN,
+    last_seen_beginner_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, repo_id)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_requests (
+    request_id      BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    full_name       VARCHAR(512) NOT NULL,
+    status          VARCHAR(32) NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'running', 'done', 'failed')),
+    requested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    error_message   TEXT,
+    repo_id         BIGINT REFERENCES repositories(repo_id) ON DELETE SET NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_requests_active_name
+    ON ingest_requests (lower(full_name))
+    WHERE status IN ('queued', 'running');
+
+CREATE INDEX IF NOT EXISTS idx_ingest_requests_queued
+    ON ingest_requests (requested_at)
+    WHERE status = 'queued';
+
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id        BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    repo_id         BIGINT REFERENCES repositories(repo_id) ON DELETE SET NULL,
+    kind            VARCHAR(64) NOT NULL,
+    details         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    read_at         TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_user_unread
+    ON alerts (user_id, created_at DESC)
+    WHERE read_at IS NULL;

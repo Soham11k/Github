@@ -3,13 +3,16 @@ import { Link as RouterLink } from 'react-router-dom'
 import { Flash, Heading, Label, Link, Text } from '@primer/react'
 import { AlertIcon } from '@primer/octicons-react'
 import { api } from '../api'
+import { RankedBar } from '../components/MarketCharts'
 import RepoListItem from '../components/RepoListItem'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
+import { useChartTheme } from '../lib/chartTheme'
 
 export default function Inactive() {
   const [items, setItems] = useState([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const theme = useChartTheme()
 
   useEffect(() => {
     api.inactive(50)
@@ -43,17 +46,34 @@ export default function Inactive() {
           icon={AlertIcon}
         />
       ) : (
-        <div className="panel" style={{ marginTop: '1rem' }}>
-          <div className="panel-head">
-            <span><strong>{items.length}</strong> repositories</span>
-            <Link as={RouterLink} to="/repos?filter=abandoned">Open in search</Link>
+        <>
+          <section className="panel" style={{ marginTop: '1rem' }}>
+            <div className="panel-head">
+              <Heading as="h2" className="h3">Days since last push</Heading>
+            </div>
+            <RankedBar
+              items={items.slice(0, 15).map((r) => ({
+                label: r.full_name,
+                value: Number(r.days_since_push) || 0,
+              }))}
+              label="Days"
+              limit={15}
+              color={theme.danger}
+            />
+          </section>
+
+          <div className="panel" style={{ marginTop: '1rem' }}>
+            <div className="panel-head">
+              <span><strong>{items.length}</strong> repositories</span>
+              <Link as={RouterLink} to="/repos?filter=abandoned">Open in search</Link>
+            </div>
+            <div className="repo-list">
+              {items.map((r) => (
+                <RepoListItem key={r.repo_id} repo={r} />
+              ))}
+            </div>
           </div>
-          <div className="repo-list">
-            {items.map((r) => (
-              <RepoListItem key={r.repo_id} repo={r} />
-            ))}
-          </div>
-        </div>
+        </>
       )}
     </div>
   )

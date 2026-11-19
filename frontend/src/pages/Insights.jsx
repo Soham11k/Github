@@ -6,33 +6,30 @@ import {
   CategoryScale,
   LinearScale,
   BarElement,
-  LineElement,
-  PointElement,
   Tooltip,
   Legend,
-  Filler,
 } from 'chart.js'
-import { Bar, Line } from 'react-chartjs-2'
+import { Bar } from 'react-chartjs-2'
 import { GraphIcon } from '@primer/octicons-react'
 import { api } from '../api'
+import CommitHeatmap from '../components/CommitHeatmap'
+import {
+  MultiLine,
+  RankedBar,
+  ShareDoughnut,
+} from '../components/MarketCharts'
+import { HealthDistributionChart } from '../components/RepoCharts'
 import RepoListItem from '../components/RepoListItem'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
 import { useChartTheme } from '../lib/chartTheme'
 import { compactNumber } from '../lib/format'
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  LineElement,
-  PointElement,
-  Tooltip,
-  Legend,
-  Filler,
-)
+ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
 export default function Insights() {
   const [data, setData] = useState(null)
+  const [healthDist, setHealthDist] = useState(null)
+  const [heatmap, setHeatmap] = useState({ items: [], timezone: 'UTC' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const theme = useChartTheme()
@@ -44,50 +41,48 @@ export default function Insights() {
       .finally(() => setLoading(false))
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    Promise.allSettled([
+      api.marketHealthDistribution(),
+      api.marketCommitHeatmap(),
+    ]).then(([distRes, heatRes]) => {
+      if (cancelled) return
+      if (distRes.status === 'fulfilled') setHealthDist(distRes.value)
+      if (heatRes.status === 'fulfilled') {
+        setHeatmap({
+          items: heatRes.value.items || [],
+          timezone: heatRes.value.timezone || 'UTC',
+        })
+      }
+    })
+    return () => { cancelled = true }
+  }, [])
+
   if (loading) return <LoadingState label="Loading insights…" />
   if (error) return <ErrorState message={error} />
   if (!data) return <EmptyState title="No insight data" icon={GraphIcon} />
 
   const { languages, activity, top_repos: topRepos, top_orgs: topOrgs } = data
 
-  const chartDefaults = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { labels: { color: theme.text } },
-    },
-    scales: {
-      x: {
-        ticks: { color: theme.text },
-        grid: { color: theme.grid },
-      },
-      y: {
-        ticks: { color: theme.text },
-        grid: { color: theme.grid },
-      },
-    },
-  }
-
   const langChart = {
-    labels: languages.map((l) => l.language_name),
+    labels: (languages || []).map((l) => l.language_name),
     datasets: [{
       label: 'Total bytes',
-      data: languages.map((l) => Number(l.total_bytes)),
+      data: (languages || []).map((l) => Number(l.total_bytes)),
       backgroundColor: theme.palette,
       borderRadius: 6,
     }],
   }
 
-  const activityChart = {
-    labels: activity.map((a) => a.activity_date),
-    datasets: [{
-      label: 'Commits / day',
-      data: activity.map((a) => a.commit_count),
-      borderColor: theme.accent,
-      backgroundColor: `${theme.accent}33`,
-      fill: true,
-      tension: 0.35,
-    }],
+  const chartDefaults = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: theme.text } } },
+    scales: {
+      x: { ticks: { color: theme.text }, grid: { color: theme.grid } },
+      y: { ticks: { color: theme.text }, grid: { color: theme.grid } },
+    },
   }
 
   return (
@@ -112,11 +107,79 @@ export default function Insights() {
         </section>
         <section className="panel">
           <div className="panel-head">
-            <Heading as="h2" className="h3">Commit activity (90 days)</Heading>
+            <Heading as="h2" className="h3">Language share</Heading>
           </div>
-          <div className="chart-wrap">
-            <Line data={activityChart} options={chartDefaults} />
+          <ShareDoughnut
+            items={(languages || []).map((l) => ({
+              label: l.language_name,
+              value: Number(l.total_bytes) || 0,
+            }))}
+            emptyMessage="No language bytes yet."
+          />
+        </section>
+      </div>
+
+      <section className="panel" style={{ marginTop: '1rem' }}>
+        <div className="panel-head">
+          <Heading as="h2" className="h3">Activity (90 days)</Heading>
+        </div>
+        <MultiLine
+          rows={activity || []}
+          xKey="activity_date"
+          fillFirst
+          series={[
+            { key: 'commit_count', label: 'Commits', color: theme.accent },
+            { key: 'active_repos', label: 'Active repos', color: theme.success },
+            { key: 'active_contributors', label: 'Active contributors', color: theme.done },
+          ]}
+        />
+      </section>
+
+      <div className="insights-charts" style={{ marginTop: '1rem' }}>
+        <section className="panel">
+          <div className="panel-head">
+            <Heading as="h2" className="h3">Top repos by health</Heading>
+            <Link as={RouterLink} to="/repos?sort=health">All repos</Link>
           </div>
+          <RankedBar
+            items={(topRepos || []).map((r) => ({
+              label: r.full_name,
+              value: Number(r.health_score) || 0,
+            }))}
+            label="Health"
+            limit={10}
+          />
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <Heading as="h2" className="h3">Top orgs by stars</Heading>
+            <Link as={RouterLink} to="/orgs">View all</Link>
+          </div>
+          <RankedBar
+            items={(topOrgs || []).map((o) => ({
+              label: o.org_login,
+              value: Number(o.total_stars) || 0,
+            }))}
+            label="Stars"
+            limit={10}
+            color={theme.attention}
+          />
+        </section>
+      </div>
+
+      <div className="insights-charts" style={{ marginTop: '1rem' }}>
+        <section className="panel">
+          <div className="panel-head">
+            <Heading as="h2" className="h3">Marketplace health mix</Heading>
+          </div>
+          <HealthDistributionChart distribution={healthDist} />
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <Heading as="h2" className="h3">Global commit punch card</Heading>
+          </div>
+          <Text as="p" className="muted">All indexed repos · weekday × hour (UTC)</Text>
+          <CommitHeatmap items={heatmap.items} timezone={heatmap.timezone} />
         </section>
       </div>
 

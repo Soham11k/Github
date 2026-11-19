@@ -152,6 +152,99 @@ BEGIN
 END;
 $$;
 
+-- Drop old audit rows to keep Neon free-tier storage under control
+CREATE OR REPLACE PROCEDURE sp_prune_audit_log(days_keep INTEGER DEFAULT 14)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    DELETE FROM audit_log
+    WHERE changed_at < NOW() - make_interval(days => days_keep);
+END;
+$$;
+
+-- Compare watchlist snapshots to current health and emit in-app alerts
+CREATE OR REPLACE PROCEDURE sp_generate_watchlist_alerts()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    WITH beginner_counts AS (
+        SELECT
+            i.repo_id,
+            COUNT(DISTINCT i.issue_id)::INTEGER AS beginner_issue_count
+        FROM issues i
+        JOIN issue_labels il ON il.issue_id = i.issue_id
+        WHERE i.state = 'open'
+          AND NOT i.is_pull_request
+          AND LOWER(il.label) IN (
+              'good first issue', 'good-first-issue',
+              'help wanted', 'help-wanted', 'beginner', 'easy'
+          )
+        GROUP BY i.repo_id
+    ),
+    current_state AS (
+        SELECT
+            w.user_id,
+            w.repo_id,
+            w.last_seen_health,
+            w.last_seen_abandoned,
+            w.last_seen_beginner_count,
+            h.full_name,
+            h.health_score,
+            h.is_abandoned,
+            COALESCE(b.beginner_issue_count, 0) AS beginner_issue_count
+        FROM watchlist w
+        JOIN v_repo_health h ON h.repo_id = w.repo_id
+        LEFT JOIN beginner_counts b ON b.repo_id = w.repo_id
+    )
+    INSERT INTO alerts (user_id, repo_id, kind, details)
+    SELECT
+        c.user_id,
+        c.repo_id,
+        CASE
+            WHEN c.is_abandoned IS TRUE
+                 AND COALESCE(c.last_seen_abandoned, FALSE) IS FALSE
+                THEN 'newly_abandoned'
+            WHEN c.last_seen_health IS NOT NULL
+                 AND c.health_score <= c.last_seen_health - 10
+                THEN 'health_drop'
+            WHEN c.beginner_issue_count >= COALESCE(c.last_seen_beginner_count, 0) + 3
+                THEN 'beginner_issues'
+        END AS kind,
+        jsonb_build_object(
+            'full_name', c.full_name,
+            'health_score', c.health_score,
+            'previous_health', c.last_seen_health,
+            'is_abandoned', c.is_abandoned,
+            'beginner_issue_count', c.beginner_issue_count,
+            'previous_beginner_count', COALESCE(c.last_seen_beginner_count, 0)
+        ) AS details
+    FROM current_state c
+    WHERE
+        (c.is_abandoned IS TRUE AND COALESCE(c.last_seen_abandoned, FALSE) IS FALSE)
+        OR (c.last_seen_health IS NOT NULL AND c.health_score <= c.last_seen_health - 10)
+        OR (c.beginner_issue_count >= COALESCE(c.last_seen_beginner_count, 0) + 3);
+
+    UPDATE watchlist w
+    SET
+        last_seen_health = h.health_score,
+        last_seen_abandoned = h.is_abandoned,
+        last_seen_beginner_count = COALESCE((
+            SELECT COUNT(DISTINCT i.issue_id)::INTEGER
+            FROM issues i
+            JOIN issue_labels il ON il.issue_id = i.issue_id
+            WHERE i.repo_id = w.repo_id
+              AND i.state = 'open'
+              AND NOT i.is_pull_request
+              AND LOWER(il.label) IN (
+                  'good first issue', 'good-first-issue',
+                  'help wanted', 'help-wanted', 'beginner', 'easy'
+              )
+        ), 0)
+    FROM v_repo_health h
+    WHERE h.repo_id = w.repo_id;
+END;
+$$;
+
 -- Recursive CTE: fork lineage for a repository
 DROP FUNCTION IF EXISTS fn_repo_fork_tree(BIGINT);
 CREATE OR REPLACE FUNCTION fn_repo_fork_tree(p_repo_id BIGINT)

@@ -123,13 +123,15 @@ INSERT INTO repo_contributors (repo_id, contributor_id, contributions) VALUES
 ON CONFLICT (repo_id, contributor_id) DO UPDATE SET contributions = EXCLUDED.contributions;
 
 -- Generate multi-month commits for active repos (skip abandoned/archived extremes)
+-- Spread hours across 08:00–20:00 UTC so the punch-card heatmap is not a single column.
 INSERT INTO commits (repo_id, sha, contributor_id, message, committed_at, parent_sha, html_url)
 SELECT
   g.repo_id,
   substr(md5(g.repo_id::text || '-' || g.n::text), 1, 40),
   g.contributor_id,
   'Seed commit #' || g.n,
-  NOW() - (g.days || ' days')::INTERVAL,
+  DATE_TRUNC('day', NOW()) - (g.days || ' days')::INTERVAL
+    + make_interval(hours => 8 + (g.n * 5 + g.repo_id) % 13, mins => (g.n * 17) % 60),
   CASE WHEN g.n > 1 THEN substr(md5(g.repo_id::text || '-' || (g.n - 1)::text), 1, 40) ELSE NULL END,
   NULL
 FROM (
@@ -160,7 +162,7 @@ FROM (
   SELECT 920010, n, 910005, (n * 12)
   FROM generate_series(1, 6) n
 ) g
-ON CONFLICT (repo_id, sha) DO NOTHING;
+ON CONFLICT (repo_id, sha) DO UPDATE SET committed_at = EXCLUDED.committed_at;
 
 -- Sparse old commits for stale/archived
 INSERT INTO commits (repo_id, sha, contributor_id, message, committed_at, parent_sha)

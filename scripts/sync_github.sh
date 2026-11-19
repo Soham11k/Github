@@ -31,6 +31,17 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
 fi
 ln -sfn "$VENV_DIR" "$ROOT/backend/.venv"
 
+# Drop offline demo rows before live sync so Explore does not mix fiction with GitHub
+# Local start prefers localhost; still honor DATABASE_URL when it points at local Postgres.
+LOCAL_DB_URL="$DATABASE_URL"
+if [[ "$LOCAL_DB_URL" != *"localhost"* && "$LOCAL_DB_URL" != *"127.0.0.1"* ]]; then
+  if [[ "${USE_REMOTE_DB:-}" != "1" ]]; then
+    LOCAL_DB_URL="postgresql://osint:osint@localhost:5432/github_osint"
+  fi
+fi
+export DATABASE_URL="$LOCAL_DB_URL"
+bash "$ROOT/scripts/purge_demo.sh"
+
 LIMIT="${LIMIT:-12}"
 QUERY="${QUERY:-}"
 # REPOS: space-separated owner/repo list, e.g. REPOS="pallets/flask facebook/react"

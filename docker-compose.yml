@@ -12,15 +12,6 @@ services:
     #   - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ./sql/indexes.sql:/docker-entrypoint-initdb.d/02_indexes.sql:ro
-      - ./sql/triggers.sql:/docker-entrypoint-initdb.d/03_triggers.sql:ro
-      - ./sql/views.sql:/docker-entrypoint-initdb.d/04_views.sql:ro
-      - ./sql/procedures.sql:/docker-entrypoint-initdb.d/05_procedures.sql:ro
-      - ./sql/grants.sql:/docker-entrypoint-initdb.d/06_grants.sql:ro
-      # Demo SQL seed is optional — leave commented so API bootstrap can live-ingest
-      # when GITHUB_TOKEN is set. Uncomment for offline demos without a token:
-      # - ./sql/seed_demo.sql:/docker-entrypoint-initdb.d/07_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U osint -d github_osint"]
       interval: 5s
@@ -29,7 +20,8 @@ services:
 
   api:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: github_osint_api
     environment:
       DATABASE_URL: postgresql://osint:osint@db:5432/github_osint
@@ -37,6 +29,10 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # Local demo only — change ADMIN_TOKEN for any shared deploy
       ADMIN_TOKEN: ${ADMIN_TOKEN:-changeme}
+      APP_ENV: development
+      FRONTEND_URL: http://localhost:8080
+      PUBLIC_API_URL: http://localhost:8000
+      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
     ports:
       - "8000:8000"
     depends_on:

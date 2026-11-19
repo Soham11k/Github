@@ -25,29 +25,27 @@ jobs:
     env:
       DATABASE_URL: postgresql://osint:osint@localhost:5432/github_osint
       PGPASSWORD: osint
+      APP_ENV: development
+      ADMIN_TOKEN: test-admin-token
+      ADMIN_GITHUB_LOGINS: testadmin
+      SESSION_SECRET: test-session-secret-not-for-prod
+      CORS_ORIGINS: http://localhost:5173
+      GITHUB_OAUTH_CLIENT_ID: test-client
+      GITHUB_OAUTH_CLIENT_SECRET: test-secret
+      PYTHONPATH: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Apply SQL
-        run: |
-          for f in schema indexes triggers views procedures grants; do
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "sql/${f}.sql"
-          done
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/seed_demo.sql
-      - name: Smoke demo queries (non-interactive subset)
-        run: |
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SELECT COUNT(*) FROM repositories;"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SELECT * FROM v_dashboard_kpis;"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SELECT COUNT(*) FROM mv_repo_health_summary;"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CALL sp_refresh_analytics();"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "EXPLAIN SELECT full_name, stars FROM repositories ORDER BY stars DESC LIMIT 5;"
-      - name: Install backend + import check
+      - name: Install backend
+        working-directory: backend
+        run: pip install -r requirements.txt
+      - name: Migrate + pytest
         working-directory: backend
         run: |
-          pip install -r requirements.txt
-          python -c "from app.main import app; from app.services.github_client import GitHubClient; print('ok', app.title)"
+          python -m app.migrate
+          pytest -q
 
   frontend:
     runs-on: ubuntu-latest

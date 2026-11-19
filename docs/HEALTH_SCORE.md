@@ -4,10 +4,11 @@ Implemented in `sp_refresh_health_scores` and exposed factor-by-factor in `v_hea
 
 ## Ingest sample window (important)
 
-Live GitHub sync paginates list endpoints up to configurable caps (defaults in `.env.example`):
+Live GitHub sync requests commits, issues, and pull requests **since** `INGEST_ACTIVITY_DAYS` (default **180**), then stops at the caps below. Quiet repos fill the window health/charts expect; mega-repos stay capped but the cutoff is explicit.
 
 | Resource | Default cap | Env var |
 |----------|-------------|---------|
+| Activity window | 180 days | `INGEST_ACTIVITY_DAYS` |
 | Commits | 300 | `INGEST_COMMIT_LIMIT` |
 | Issues | 200 | `INGEST_ISSUE_LIMIT` |
 | Pull requests | 100 | `INGEST_PR_LIMIT` |

@@ -16,6 +16,7 @@ import {
 import { Bar, Radar } from 'react-chartjs-2'
 import { GitCompareIcon } from '@primer/octicons-react'
 import { api } from '../api'
+import { ScatterBubble } from '../components/MarketCharts'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
 import { useChartTheme } from '../lib/chartTheme'
 import { compactNumber, healthLabel } from '../lib/format'
@@ -198,6 +199,20 @@ export default function Compare() {
                   <div className="chart-wrap"><Radar data={radar} options={chartOpts} /></div>
                 </div>
               </div>
+
+              <section style={{ marginTop: '1rem' }}>
+                <Heading as="h2" className="h3">Stars vs health</Heading>
+                <ScatterBubble
+                  mode="scatter"
+                  xLabel="Stars"
+                  yLabel="Health"
+                  points={items.map((r) => ({
+                    x: Number(r.stars) || 0,
+                    y: Number(r.health_score) || 0,
+                    label: r.full_name,
+                  }))}
+                />
+              </section>
             </>
           )}
         </div>

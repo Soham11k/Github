@@ -9,11 +9,14 @@ BEGIN
   END IF;
 END $$;
 
--- Read-only analyst role for course demos (SELECT only)
+-- Read-only analyst role for course demos (SELECT only).
+-- NOLOGIN in production; local demos can enable login via sql/local_ro_login.sql
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'osint_ro') THEN
-    CREATE ROLE osint_ro LOGIN PASSWORD 'osint_ro';
+    CREATE ROLE osint_ro NOLOGIN;
+  ELSE
+    ALTER ROLE osint_ro NOLOGIN;
   END IF;
 END $$;
 

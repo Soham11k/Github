@@ -3,8 +3,10 @@ import { Link as RouterLink } from 'react-router-dom'
 import { FormControl, Heading, Label, Link, Select, Text } from '@primer/react'
 import { LightBulbIcon } from '@primer/octicons-react'
 import { api } from '../api'
+import { RankedBar } from '../components/MarketCharts'
 import RepoListItem from '../components/RepoListItem'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
+import { useChartTheme } from '../lib/chartTheme'
 
 export default function BeginnerFriendly() {
   const [items, setItems] = useState([])
@@ -12,6 +14,7 @@ export default function BeginnerFriendly() {
   const [language, setLanguage] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const theme = useChartTheme()
 
   useEffect(() => {
     api.languages()
@@ -73,30 +76,47 @@ export default function BeginnerFriendly() {
           }
         />
       ) : (
-        <div className="panel">
-          <div className="panel-head">
-            <span><strong>{items.length}</strong> repositories</span>
-            <Link as={RouterLink} to="/repos?filter=beginner">Open in search</Link>
+        <>
+          <section className="panel" style={{ marginBottom: '1rem' }}>
+            <div className="panel-head">
+              <Heading as="h2" className="h3">Beginner labels by repo</Heading>
+            </div>
+            <RankedBar
+              items={items.map((r) => ({
+                label: r.full_name,
+                value: Number(r.beginner_label_count) || 0,
+              }))}
+              label="Beginner labels"
+              limit={15}
+              color={theme.success}
+            />
+          </section>
+
+          <div className="panel">
+            <div className="panel-head">
+              <span><strong>{items.length}</strong> repositories</span>
+              <Link as={RouterLink} to="/repos?filter=beginner">Open in search</Link>
+            </div>
+            <div className="repo-list">
+              {items.map((r) => (
+                <div key={r.repo_id}>
+                  <RepoListItem repo={r} />
+                  {!!r.sample_issues?.length && (
+                    <ul className="beginner-issue-list">
+                      {r.sample_issues.map((iss) => (
+                        <li key={iss.issue_id || iss.number}>
+                          <a href={iss.html_url} target="_blank" rel="noreferrer">
+                            #{iss.number} {iss.title}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="repo-list">
-            {items.map((r) => (
-              <div key={r.repo_id}>
-                <RepoListItem repo={r} />
-                {!!r.sample_issues?.length && (
-                  <ul className="beginner-issue-list">
-                    {r.sample_issues.map((iss) => (
-                      <li key={iss.issue_id || iss.number}>
-                        <a href={iss.html_url} target="_blank" rel="noreferrer">
-                          #{iss.number} {iss.title}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        </>
       )}
     </div>
   )

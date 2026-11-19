@@ -1,13 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link as RouterLink, NavLink, useNavigate } from 'react-router-dom'
-import { Button, IconButton, TextInput } from '@primer/react'
+import { ActionMenu, ActionList, Avatar, Button, CounterLabel, IconButton, TextInput } from '@primer/react'
 import {
-  MarkGithubIcon,
+  BellIcon,
   MoonIcon,
   SearchIcon,
   SunIcon,
   SyncIcon,
 } from '@primer/octicons-react'
+import BrandMark from './BrandMark'
+import { useAuth } from '../auth/AuthContext'
+import { APP_NAME } from '../brand'
 import { useColorMode } from '../lib/colorMode'
 
 const NAV = [
@@ -19,7 +22,6 @@ const NAV = [
   { to: '/contributors', label: 'People' },
   { to: '/insights', label: 'Insights' },
   { to: '/inactive', label: 'Unmaintained' },
-  { to: '/ingest', label: 'Ingest' },
 ]
 
 function ThemeIcon({ mode }) {
@@ -32,6 +34,8 @@ export default function AppHeader() {
   const navigate = useNavigate()
   const inputRef = useRef(null)
   const { colorMode, cycleColorMode } = useColorMode()
+  const { user, loading, isAdmin, unreadAlerts, loginUrl, logout } = useAuth()
+  const [menuOpen, setMenuOpen] = useState(false)
 
   useEffect(() => {
     const onKey = (e) => {
@@ -55,15 +59,20 @@ export default function AppHeader() {
   const themeLabel =
     colorMode === 'dark' ? 'Dark' : colorMode === 'light' ? 'Light' : 'Auto'
 
+  const navItems = isAdmin
+    ? [...NAV, { to: '/ingest', label: 'Ingest' }]
+    : NAV
+
   return (
     <header className="gh-header">
       <div className="gh-header-inner">
         <div className="gh-header-left">
-          <RouterLink to="/" className="gh-logo" aria-label="GitHub OSINT home">
-            <MarkGithubIcon size={32} />
+          <RouterLink to="/" className="gh-logo" aria-label={`${APP_NAME} home`}>
+            <BrandMark size={32} />
+            <span className="gh-brand-text">{APP_NAME}</span>
           </RouterLink>
           <nav className="gh-nav" aria-label="Primary">
-            {NAV.map((item) => (
+            {navItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -99,6 +108,58 @@ export default function AppHeader() {
             onClick={cycleColorMode}
           />
           <span className="gh-theme-label">{themeLabel}</span>
+
+          {!loading && user && (
+            <IconButton
+              icon={BellIcon}
+              aria-label="Alerts"
+              variant="invisible"
+              onClick={() => navigate('/alerts')}
+              className="alerts-bell"
+            />
+          )}
+          {!loading && user && unreadAlerts > 0 && (
+            <CounterLabel className="alerts-count">{unreadAlerts}</CounterLabel>
+          )}
+
+          {!loading && !user && (
+            <Button as="a" href={loginUrl} size="small" variant="primary">
+              Sign in with GitHub
+            </Button>
+          )}
+
+          {!loading && user && (
+            <ActionMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <ActionMenu.Anchor>
+                <Button variant="invisible" size="small" className="user-menu-btn">
+                  <Avatar src={user.avatar_url} size={28} alt={user.login} />
+                </Button>
+              </ActionMenu.Anchor>
+              <ActionMenu.Overlay width="medium">
+                <ActionList>
+                  <ActionList.Group title={`Signed in as ${user.login}`}>
+                    <ActionList.Item onSelect={() => navigate('/watchlist')}>Watchlist</ActionList.Item>
+                    <ActionList.Item onSelect={() => navigate('/requests')}>Requests</ActionList.Item>
+                    <ActionList.Item onSelect={() => navigate('/alerts')}>
+                      Alerts
+                      {unreadAlerts > 0 ? ` (${unreadAlerts})` : ''}
+                    </ActionList.Item>
+                  </ActionList.Group>
+                  <ActionList.Divider />
+                  <ActionList.Item onSelect={() => navigate('/about')}>About</ActionList.Item>
+                  <ActionList.Item
+                    variant="danger"
+                    onSelect={async () => {
+                      await logout()
+                      navigate('/')
+                    }}
+                  >
+                    Sign out
+                  </ActionList.Item>
+                </ActionList>
+              </ActionMenu.Overlay>
+            </ActionMenu>
+          )}
         </div>
       </div>
     </header>

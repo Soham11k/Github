@@ -20,6 +20,8 @@ def init_pool() -> ConnectionPool:
             max_size=10,
             kwargs={"row_factory": dict_row},
             open=True,
+            # Replace connections Neon closes after scale-to-zero
+            check=ConnectionPool.check_connection,
         )
     return _pool
 

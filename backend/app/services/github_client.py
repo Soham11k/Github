@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
 
 from app.config import get_settings
+
+
+def activity_since_iso(days: Optional[int] = None) -> str:
+    """ISO-8601 UTC timestamp for the start of the ingest activity window."""
+    settings = get_settings()
+    window = days if days is not None else settings.ingest_activity_days
+    since = datetime.now(tz=timezone.utc) - timedelta(days=max(1, int(window)))
+    return since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_github_dt(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class GitHubClient:
@@ -16,6 +33,7 @@ class GitHubClient:
         settings = get_settings()
         self.base_url = settings.github_api_base.rstrip("/")
         self.token = token if token is not None else settings.github_token
+        self.activity_days = settings.ingest_activity_days
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -196,15 +214,20 @@ class GitHubClient:
             limit,
         )
 
-    def get_commits(self, owner: str, repo: str, limit: int = 300) -> list[dict]:
-        return self._paginate(f"/repos/{owner}/{repo}/commits", {}, limit)
+    def get_commits(
+        self, owner: str, repo: str, limit: int = 300, *, since: Optional[str] = None
+    ) -> list[dict]:
+        params: dict[str, Any] = {"since": since or activity_since_iso(self.activity_days)}
+        return self._paginate(f"/repos/{owner}/{repo}/commits", params, limit)
 
-    def get_issues(self, owner: str, repo: str, limit: int = 200) -> list[dict]:
-        return self._paginate(
-            f"/repos/{owner}/{repo}/issues",
-            {"state": "all"},
-            limit,
-        )
+    def get_issues(
+        self, owner: str, repo: str, limit: int = 200, *, since: Optional[str] = None
+    ) -> list[dict]:
+        params: dict[str, Any] = {
+            "state": "all",
+            "since": since or activity_since_iso(self.activity_days),
+        }
+        return self._paginate(f"/repos/{owner}/{repo}/issues", params, limit)
 
     def get_labeled_issues(
         self, owner: str, repo: str, label: str, limit: int = 50
@@ -216,12 +239,45 @@ class GitHubClient:
             limit,
         )
 
-    def get_pulls(self, owner: str, repo: str, limit: int = 100) -> list[dict]:
-        return self._paginate(
-            f"/repos/{owner}/{repo}/pulls",
-            {"state": "all"},
-            limit,
+    def get_pulls(
+        self, owner: str, repo: str, limit: int = 100, *, since: Optional[str] = None
+    ) -> list[dict]:
+        """Pulls list has no since= param — filter by created_at and stop past the window."""
+        since_iso = since or activity_since_iso(self.activity_days)
+        since_dt = _parse_github_dt(since_iso) or (
+            datetime.now(tz=timezone.utc) - timedelta(days=self.activity_days)
         )
+        results: list[dict] = []
+        page = 1
+        per_page = min(100, max(1, limit))
+        while len(results) < limit:
+            data = self.get(
+                f"/repos/{owner}/{repo}/pulls",
+                params={
+                    "state": "all",
+                    "sort": "created",
+                    "direction": "desc",
+                    "per_page": per_page,
+                    "page": page,
+                },
+            )
+            if not data or not isinstance(data, list):
+                break
+            older_than_window = False
+            for pr in data:
+                created = _parse_github_dt(pr.get("created_at"))
+                if created is not None and created < since_dt:
+                    older_than_window = True
+                    break
+                results.append(pr)
+                if len(results) >= limit:
+                    break
+            if older_than_window or len(data) < per_page:
+                break
+            page += 1
+            if page > 40:
+                break
+        return results[:limit]
 
     def get_pull(self, owner: str, repo: str, number: int) -> Optional[dict]:
         return self.get(f"/repos/{owner}/{repo}/pulls/{number}")
@@ -243,55 +299,27 @@ class GitHubClient:
             return None
 
 
+# Showcase first (~12): mid-size + beginner + archived/quiet + one famous contrast.
+# Extra mid-size entries follow for higher LIMIT / empty-DB bootstrap.
 DEFAULT_SEED_REPOS = [
     "firstcontributions/first-contributions",
-    "scikit-learn/scikit-learn",
-    "microsoft/TypeScript",
-    "facebook/react",
-    "microsoft/vscode",
-    "vercel/next.js",
-    "django/django",
     "pallets/flask",
+    "pallets/click",
     "fastapi/fastapi",
-    "nodejs/node",
-    "python/cpython",
-    "kubernetes/kubernetes",
-    "tensorflow/tensorflow",
-    "pytorch/pytorch",
-    "rust-lang/rust",
-    "golang/go",
-    "angular/angular",
-    "mui/material-ui",
-    "home-assistant/core",
-    "twbs/bootstrap",
-    "jupyter/notebook",
-    "pandas-dev/pandas",
-    "numpy/numpy",
+    "encode/httpx",
+    "psf/requests",
+    "encode/starlette",
+    "Kludex/uvicorn",
+    "pallets/jinja",
+    "pallets/werkzeug",
+    "facebook/react",
+    "atom/atom",
+    "moment/moment",
     "prettier/prettier",
     "eslint/eslint",
-    "webpack/webpack",
-    "redis/redis",
-    "postgres/postgres",
-    "git/git",
-    "ohmyzsh/ohmyzsh",
-    "facebook/react-native",
-    "vuejs/vue",
-    "sveltejs/svelte",
-    "denoland/deno",
-    "microsoft/PowerToys",
-    "hashicorp/terraform",
-    "ansible/ansible",
-    "elastic/elasticsearch",
-    "apache/spark",
-    "huggingface/transformers",
-    "openai/openai-python",
-    "langchain-ai/langchain",
-    "obsidianmd/obsidian-releases",
-    "godotengine/godot",
-    "bitcoin/bitcoin",
-    "electron/electron",
-    "tailwindlabs/tailwindcss",
-    "storybookjs/storybook",
     "nestjs/nest",
-    "spring-projects/spring-boot",
+    "sveltejs/svelte",
+    "tailwindlabs/tailwindcss",
+    "openai/openai-python",
+    "pallets/flask-sqlalchemy",
 ]

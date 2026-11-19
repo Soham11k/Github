@@ -25,6 +25,7 @@ export function useChartTheme() {
       success: cssVar('--fgColor-success', '#1a7f37'),
       attention: cssVar('--fgColor-attention', '#9a6700'),
       danger: cssVar('--fgColor-danger', '#cf222e'),
+      done: cssVar('--fgColor-done', '#8250df'),
       palette: [
         cssVar('--fgColor-accent', '#0969da'),
         cssVar('--fgColor-success', '#1a7f37'),

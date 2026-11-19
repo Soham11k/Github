@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Docker API entrypoint: live-ingest when token set and DB empty, then start uvicorn
+# API entrypoint: wait for DB, migrate, optional bootstrap ingest, start uvicorn
 set -euo pipefail
 
 echo "==> Waiting for database…"
@@ -21,6 +21,28 @@ for i in range(60):
         time.sleep(1)
 PY
 
+echo "==> Applying SQL migrations…"
+python -m app.migrate
+
+APP_ENV="$(echo -n "${APP_ENV:-development}" | tr -d '[:space:]')"
+if [[ "${APP_ENV}" != "production" ]]; then
+  if [[ -f /app/sql/local_ro_login.sql ]]; then
+    echo "==> Enabling local osint_ro login (non-production)…"
+    python - <<'PY'
+import os
+import psycopg
+from pathlib import Path
+url = os.environ.get("DATABASE_URL", "postgresql://osint:osint@db:5432/github_osint")
+sql = Path("/app/sql/local_ro_login.sql").read_text()
+with psycopg.connect(url) as conn:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+print("    osint_ro login enabled for local demos")
+PY
+  fi
+fi
+
 TOKEN="$(echo -n "${GITHUB_TOKEN:-}" | tr -d '[:space:]')"
 if [[ -n "$TOKEN" ]]; then
   COUNT="$(python - <<'PY'
@@ -40,7 +62,8 @@ PY
     echo "==> Database already has ${COUNT} repos — skipping bootstrap ingest"
   fi
 else
-  echo "==> No GITHUB_TOKEN — using SQL seed from DB init (if any)"
+  echo "==> No GITHUB_TOKEN — skipping live bootstrap"
 fi
 
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+PORT="${PORT:-8000}"
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" --proxy-headers --forwarded-allow-ips '*'

@@ -1,7 +1,10 @@
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi.responses import PlainTextResponse
+from starlette.responses import Response as RawResponse
 
+from app.auth import public_cache_headers, require_admin
 from app.config import get_settings
 from app.db import execute, fetch_all, fetch_one
 from app.services.ingest import create_ingest_run, execute_ingest_run
@@ -15,7 +18,8 @@ def health() -> dict[str, str]:
 
 
 @router.get("/dashboard")
-def dashboard() -> dict[str, Any]:
+def dashboard(response: Response) -> dict[str, Any]:
+    response.headers.update(public_cache_headers())
     kpis = fetch_one("SELECT * FROM v_dashboard_kpis") or {}
     languages = fetch_all(
         """
@@ -178,6 +182,25 @@ def get_repo(repo_id: int) -> dict[str, Any]:
         (repo_id,),
     )
     report = fetch_one("SELECT fn_generate_repo_report(%s) AS report", (repo_id,))
+    settings = get_settings()
+    sync_meta = fetch_one(
+        """
+        SELECT last_full_sync_at, synced_at, COALESCE(sync_depth, 'full') AS sync_depth
+        FROM repositories
+        WHERE repo_id = %s
+        """,
+        (repo_id,),
+    ) or {}
+    oldest = fetch_one(
+        """
+        SELECT LEAST(
+            (SELECT MIN(committed_at) FROM commits WHERE repo_id = %s),
+            (SELECT MIN(created_at) FROM issues WHERE repo_id = %s AND NOT is_pull_request),
+            (SELECT MIN(created_at) FROM pull_requests WHERE repo_id = %s)
+        ) AS oldest_activity
+        """,
+        (repo_id, repo_id, repo_id),
+    )
     return {
         "repo": repo,
         "languages": languages,
@@ -185,6 +208,16 @@ def get_repo(repo_id: int) -> dict[str, Any]:
         "issues": issues,
         "pull_requests": pulls,
         "report": report["report"] if report else {},
+        "sample_window": {
+            "activity_days": settings.ingest_activity_days,
+            "commit_cap": settings.ingest_commit_limit,
+            "issue_cap": settings.ingest_issue_limit,
+            "pr_cap": settings.ingest_pr_limit,
+            "oldest_activity": (oldest or {}).get("oldest_activity"),
+            "last_full_sync_at": sync_meta.get("last_full_sync_at"),
+            "synced_at": sync_meta.get("synced_at"),
+            "sync_depth": sync_meta.get("sync_depth"),
+        },
     }
 
 
@@ -231,12 +264,9 @@ def commit_ancestry(
 def sync_one_repo(
     repo_id: int,
     background_tasks: BackgroundTasks,
-    x_admin_token: Optional[str] = Header(default=None),
+    _admin: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     """Fully sync one repository (e.g. promote a fork stub)."""
-    settings = get_settings()
-    if x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
     row = fetch_one(
         "SELECT owner_login, name, full_name FROM repositories WHERE repo_id = %s",
         (repo_id,),
@@ -280,6 +310,100 @@ def activity_monthly(repo_id: int) -> dict[str, Any]:
         (repo_id,),
     )
     return {"repo_id": repo_id, "items": items}
+
+
+@router.get("/repos/{repo_id}/commit-heatmap")
+def commit_heatmap(repo_id: int) -> dict[str, Any]:
+    exists = fetch_one("SELECT repo_id FROM repositories WHERE repo_id = %s", (repo_id,))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    items = fetch_all(
+        """
+        SELECT weekday, hour_of_day, commit_count
+        FROM v_repo_commit_heatmap
+        WHERE repo_id = %s
+        ORDER BY weekday, hour_of_day
+        """,
+        (repo_id,),
+    )
+    return {"repo_id": repo_id, "timezone": "UTC", "items": items}
+
+
+@router.get("/repos/{repo_id}/issue-flow")
+def issue_flow(repo_id: int) -> dict[str, Any]:
+    exists = fetch_one("SELECT repo_id FROM repositories WHERE repo_id = %s", (repo_id,))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    items = fetch_all(
+        """
+        SELECT *
+        FROM v_repo_issue_flow
+        WHERE repo_id = %s
+        ORDER BY activity_month
+        """,
+        (repo_id,),
+    )
+    totals = fetch_one(
+        """
+        SELECT
+            (SELECT COUNT(*) FILTER (WHERE NOT is_pull_request AND state = 'open')
+             FROM issues WHERE repo_id = %s) AS issues_open,
+            (SELECT COUNT(*) FILTER (WHERE NOT is_pull_request AND state = 'closed')
+             FROM issues WHERE repo_id = %s) AS issues_closed,
+            (SELECT COUNT(*) FILTER (WHERE state = 'open')
+             FROM pull_requests WHERE repo_id = %s) AS prs_open,
+            (SELECT COUNT(*) FILTER (WHERE is_merged)
+             FROM pull_requests WHERE repo_id = %s) AS prs_merged,
+            (SELECT COUNT(*) FILTER (WHERE state = 'closed' AND NOT is_merged)
+             FROM pull_requests WHERE repo_id = %s) AS prs_closed_unmerged
+        """,
+        (repo_id, repo_id, repo_id, repo_id, repo_id),
+    ) or {}
+    return {"repo_id": repo_id, "items": items, "totals": totals}
+
+
+@router.get("/repos/{repo_id}/health-distribution")
+def health_distribution(repo_id: int) -> dict[str, Any]:
+    exists = fetch_one("SELECT repo_id FROM repositories WHERE repo_id = %s", (repo_id,))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    position = fetch_one(
+        "SELECT * FROM v_repo_health_position WHERE repo_id = %s",
+        (repo_id,),
+    )
+    buckets = fetch_all(
+        """
+        SELECT health_bucket, bucket_low, bucket_high, repo_count
+        FROM v_health_distribution
+        ORDER BY health_bucket
+        """
+    )
+    return {"repo_id": repo_id, "position": position, "buckets": buckets}
+
+
+@router.get("/health-distribution")
+def market_health_distribution() -> dict[str, Any]:
+    buckets = fetch_all(
+        """
+        SELECT health_bucket, bucket_low, bucket_high, repo_count
+        FROM v_health_distribution
+        ORDER BY health_bucket
+        """
+    )
+    return {"buckets": buckets}
+
+
+@router.get("/commit-heatmap")
+def market_commit_heatmap() -> dict[str, Any]:
+    items = fetch_all(
+        """
+        SELECT weekday, hour_of_day, SUM(commit_count)::BIGINT AS commit_count
+        FROM v_repo_commit_heatmap
+        GROUP BY weekday, hour_of_day
+        ORDER BY weekday, hour_of_day
+        """
+    )
+    return {"timezone": "UTC", "items": items}
 
 
 @router.get("/compare")
@@ -474,6 +598,12 @@ def ingest_status() -> dict[str, Any]:
         "rate_limit_limit": rate_limit_limit,
         "last_sync_had_rate_limit": last_had_rate_limit,
         "last_sync": last,
+        "sample_window": {
+            "activity_days": settings.ingest_activity_days,
+            "commit_cap": settings.ingest_commit_limit,
+            "issue_cap": settings.ingest_issue_limit,
+            "pr_cap": settings.ingest_pr_limit,
+        },
     }
 
 
@@ -496,12 +626,8 @@ def get_sync_run(sync_id: int) -> dict[str, Any]:
 def trigger_ingest(
     background_tasks: BackgroundTasks,
     payload: Optional[dict[str, Any]] = None,
-    x_admin_token: Optional[str] = Header(default=None),
+    _admin: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    settings = get_settings()
-    if x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
-
     body = payload or {}
     mode = (body.get("mode") or "").strip().lower()
     query = body.get("query")
@@ -510,7 +636,7 @@ def trigger_ingest(
     use_seed = bool(body.get("use_seed", True))
 
     if mode == "surprise":
-        query = "stars:>20000"
+        query = "stars:500..20000"
         limit = 5
         repos = None
         use_seed = False
@@ -530,10 +656,85 @@ def trigger_ingest(
 
 @router.post("/analytics/refresh")
 def refresh_analytics_endpoint(
-    x_admin_token: Optional[str] = Header(default=None),
+    _admin: dict = Depends(require_admin),
 ) -> dict[str, str]:
-    settings = get_settings()
-    if x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
     execute("CALL sp_refresh_analytics()")
     return {"status": "refreshed"}
+
+
+@router.get("/badge/{owner}/{repo_name}.svg")
+def health_badge(owner: str, repo_name: str) -> RawResponse:
+    """Embeddable SVG health badge for README files."""
+    row = fetch_one(
+        """
+        SELECT full_name, health_score
+        FROM v_repo_health
+        WHERE lower(owner_login) = lower(%s) AND lower(name) = lower(%s)
+        """,
+        (owner, repo_name),
+    )
+    if not row:
+        label, value, color = "health", "n/a", "#9e9e9e"
+    else:
+        score = float(row["health_score"] or 0)
+        label = "health"
+        value = f"{score:.0f}"
+        if score >= 75:
+            color = "#2da44e"
+        elif score >= 50:
+            color = "#bf8700"
+        else:
+            color = "#cf222e"
+    # Simple shields-style SVG
+    left_w = 54
+    right_w = 36
+    total = left_w + right_w
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total}" height="20" role="img" aria-label="{label}: {value}">
+  <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+  <rect rx="3" width="{total}" height="20" fill="#555"/>
+  <rect rx="3" x="{left_w}" width="{right_w}" height="20" fill="{color}"/>
+  <path fill="{color}" d="M{left_w} 0h4v20h-4z"/>
+  <rect rx="3" width="{total}" height="20" fill="url(#s)"/>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+    <text x="{left_w / 2}" y="15" fill="#010101" fill-opacity=".3">{label}</text>
+    <text x="{left_w / 2}" y="14">{label}</text>
+    <text x="{left_w + right_w / 2}" y="15" fill="#010101" fill-opacity=".3">{value}</text>
+    <text x="{left_w + right_w / 2}" y="14">{value}</text>
+  </g>
+</svg>"""
+    return RawResponse(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "public, max-age=600",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
+@router.get("/sitemap.xml", response_class=PlainTextResponse)
+def sitemap() -> PlainTextResponse:
+    settings = get_settings()
+    base = settings.frontend_url.rstrip("/")
+    static_paths = ["", "/repos", "/compare", "/orgs", "/beginner", "/insights", "/about"]
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for path in static_paths:
+        lines.append(f"  <url><loc>{base}{path or '/'}</loc></url>")
+    repos = fetch_all(
+        """
+        SELECT repo_id FROM v_repo_health
+        ORDER BY health_score DESC, stars DESC
+        LIMIT 500
+        """
+    )
+    for r in repos:
+        lines.append(f"  <url><loc>{base}/repos/{r['repo_id']}</loc></url>")
+    lines.append("</urlset>")
+    return PlainTextResponse(
+        "\n".join(lines),
+        media_type="application/xml",
+        headers=public_cache_headers(),
+    )

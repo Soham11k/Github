@@ -10,17 +10,19 @@ import {
   TextInput,
 } from '@primer/react'
 import { SyncIcon } from '@primer/octicons-react'
+import { Link as RouterLink } from 'react-router-dom'
 import { api } from '../api'
-import { ErrorState, LoadingState } from '../components/StateBanner'
-
-const TOKEN_KEY = 'osint_admin_token'
+import { useAuth } from '../auth/AuthContext'
+import { SyncHistoryChart } from '../components/MarketCharts'
+import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
+import { usePageTitle } from '../lib/pageTitle'
 
 const SEARCH_PRESETS = [
-  { label: 'Good first issues', query: 'good-first-issues:>10 stars:>1000' },
-  { label: 'Python stars', query: 'stars:>50000 language:python' },
-  { label: 'TypeScript', query: 'stars:>30000 language:typescript' },
-  { label: 'ML topic', query: 'topic:machine-learning stars:>5000' },
-  { label: 'Help wanted', query: 'help-wanted-issues:>5 stars:>2000' },
+  { label: 'Good first issues', query: 'good-first-issues:>5 stars:500..20000' },
+  { label: 'Python mid-size', query: 'stars:500..20000 language:python' },
+  { label: 'TypeScript mid-size', query: 'stars:500..20000 language:typescript' },
+  { label: 'ML topic', query: 'topic:machine-learning stars:500..20000' },
+  { label: 'Help wanted', query: 'help-wanted-issues:>5 stars:500..20000' },
 ]
 
 function formatTs(value) {
@@ -37,6 +39,8 @@ function isActiveStatus(status) {
 }
 
 export default function Ingest() {
+  usePageTitle('Ingest')
+  const { user, loading: authLoading, isAdmin, loginUrl } = useAuth()
   const [status, setStatus] = useState(null)
   const [runs, setRuns] = useState([])
   const [error, setError] = useState('')
@@ -45,13 +49,20 @@ export default function Ingest() {
   const [activeSyncId, setActiveSyncId] = useState(null)
   const [activeRun, setActiveRun] = useState(null)
 
-  const [adminToken, setAdminToken] = useState(
-    () => sessionStorage.getItem(TOKEN_KEY) || 'changeme',
-  )
   const [useSeed, setUseSeed] = useState(true)
   const [query, setQuery] = useState('')
   const [reposText, setReposText] = useState(
-    'firstcontributions/first-contributions\nscikit-learn/scikit-learn\nfacebook/react\npallets/flask',
+    [
+      'firstcontributions/first-contributions',
+      'pallets/flask',
+      'pallets/click',
+      'fastapi/fastapi',
+      'encode/httpx',
+      'psf/requests',
+      'facebook/react',
+      'atom/atom',
+      'moment/moment',
+    ].join('\n'),
   )
   const [limit, setLimit] = useState(12)
   const [refreshing, setRefreshing] = useState(false)
@@ -63,14 +74,14 @@ export default function Ingest() {
   }, [])
 
   useEffect(() => {
+    if (!isAdmin) {
+      setLoading(false)
+      return
+    }
     refresh()
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [refresh])
-
-  useEffect(() => {
-    sessionStorage.setItem(TOKEN_KEY, adminToken)
-  }, [adminToken])
+  }, [refresh, isAdmin])
 
   useEffect(() => {
     if (!activeSyncId) return undefined
@@ -106,7 +117,7 @@ export default function Ingest() {
     setError('')
     setActiveRun(null)
     try {
-      const res = await api.ingest(body, adminToken)
+      const res = await api.ingest(body)
       setActiveSyncId(res.sync_id)
       setActiveRun({
         sync_id: res.sync_id,
@@ -142,7 +153,7 @@ export default function Ingest() {
     setRefreshing(true)
     setError('')
     try {
-      await api.refreshAnalytics(adminToken)
+      await api.refreshAnalytics()
       await refresh()
     } catch (err) {
       setError(err.message || String(err))
@@ -151,6 +162,30 @@ export default function Ingest() {
     }
   }
 
+  if (authLoading) return <LoadingState label="Checking access…" />
+  if (!user) {
+    return (
+      <div className="page">
+        <EmptyState title="Admin sign-in required" description="Ingest is restricted to operators." />
+        <Button as="a" href={loginUrl} variant="primary">Sign in with GitHub</Button>
+      </div>
+    )
+  }
+  if (!isAdmin) {
+    return (
+      <div className="page">
+        <EmptyState
+          title="Admins only"
+          description="Request public repos from the Requests page instead."
+          action={
+            <Button as={RouterLink} to="/requests" variant="primary" sx={{ mt: 2 }}>
+              Request a repository
+            </Button>
+          }
+        />
+      </div>
+    )
+  }
   if (loading) return <LoadingState label="Loading ingest status…" />
 
   const requested = activeRun?.repos_requested || 0
@@ -241,19 +276,6 @@ export default function Ingest() {
 
       <form className="ingest-form" onSubmit={onSubmit}>
         <FormControl>
-          <FormControl.Label>Admin token</FormControl.Label>
-          <TextInput
-            type="password"
-            value={adminToken}
-            onChange={(e) => setAdminToken(e.target.value)}
-            placeholder="changeme"
-            block
-            autoComplete="off"
-          />
-          <FormControl.Caption>Stored in sessionStorage only. Default is changeme.</FormControl.Caption>
-        </FormControl>
-
-        <FormControl>
           <Checkbox checked={useSeed} onChange={(e) => setUseSeed(e.target.checked)} />
           <FormControl.Label>Include built-in well-known repo list (live from GitHub)</FormControl.Label>
         </FormControl>
@@ -263,7 +285,7 @@ export default function Ingest() {
           <TextInput
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder='stars:>20000 language:python'
+            placeholder='stars:500..20000 language:python'
             block
           />
           <FormControl.Caption>Click a preset to fill the query.</FormControl.Caption>
@@ -331,6 +353,11 @@ export default function Ingest() {
               : ''}{' '}
             repos · {formatTs(status.last_sync.started_at)}
           </Text>
+        )}
+        {!!runs.length && (
+          <div style={{ marginBottom: '1rem' }}>
+            <SyncHistoryChart runs={runs} />
+          </div>
         )}
         {!runs.length && <Text className="muted">No sync runs yet.</Text>}
         {!!runs.length && (

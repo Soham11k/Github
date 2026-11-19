@@ -14,6 +14,7 @@ import {
   UnderlineNav,
 } from '@primer/react'
 import {
+  EyeIcon,
   GitBranchIcon,
   GitCommitIcon,
   GitPullRequestIcon,
@@ -27,11 +28,25 @@ import {
   SyncIcon,
 } from '@primer/octicons-react'
 import { api } from '../api'
+import { useAuth } from '../auth/AuthContext'
+import CommitHeatmap from '../components/CommitHeatmap'
 import HealthMeter from '../components/HealthMeter'
 import LanguageBar from '../components/LanguageBar'
+import {
+  FlowChart,
+  HealthDistributionChart,
+  HealthFactorRadar,
+  LanguageDoughnut,
+  MonthlyActivityChart,
+  StatusDoughnut,
+  TopContributorsChart,
+} from '../components/RepoCharts'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateBanner'
+import { useChartTheme } from '../lib/chartTheme'
+import { formatOldest } from '../components/DataAsOfBanner'
 import { compactNumber, relativeTime } from '../lib/format'
 import { languageColor } from '../lib/languageColors'
+import { usePageTitle } from '../lib/pageTitle'
 
 const TABS = [
   { id: 'overview', label: 'Overview', icon: RepoIcon },
@@ -44,15 +59,23 @@ const TABS = [
 
 export default function RepoDetail() {
   const { id } = useParams()
+  const { user, isAdmin, loginUrl } = useAuth()
   const [data, setData] = useState(null)
   const [forks, setForks] = useState([])
   const [factors, setFactors] = useState(null)
   const [monthly, setMonthly] = useState([])
   const [ancestry, setAncestry] = useState({ sha: null, nodes: [] })
+  const [heatmap, setHeatmap] = useState({ items: [], timezone: 'UTC' })
+  const [issueFlow, setIssueFlow] = useState({ items: [], totals: null })
+  const [healthDist, setHealthDist] = useState(null)
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [syncingFork, setSyncingFork] = useState(null)
+  const [watching, setWatching] = useState(false)
+  const [watchBusy, setWatchBusy] = useState(false)
+  const [badgeCopied, setBadgeCopied] = useState(false)
+  const theme = useChartTheme()
 
   useEffect(() => {
     setLoading(true)
@@ -74,23 +97,116 @@ export default function RepoDetail() {
       .finally(() => setLoading(false))
   }, [id])
 
+  useEffect(() => {
+    let cancelled = false
+    setHeatmap({ items: [], timezone: 'UTC' })
+    setIssueFlow({ items: [], totals: null })
+    setHealthDist(null)
+    Promise.allSettled([
+      api.commitHeatmap(id),
+      api.issueFlow(id),
+      api.healthDistribution(id),
+    ]).then(([heatRes, flowRes, distRes]) => {
+      if (cancelled) return
+      if (heatRes.status === 'fulfilled') {
+        setHeatmap({
+          items: heatRes.value.items || [],
+          timezone: heatRes.value.timezone || 'UTC',
+        })
+      }
+      if (flowRes.status === 'fulfilled') {
+        setIssueFlow({
+          items: flowRes.value.items || [],
+          totals: flowRes.value.totals || null,
+        })
+      }
+      if (distRes.status === 'fulfilled') {
+        setHealthDist(distRes.value)
+      }
+    })
+    return () => { cancelled = true }
+  }, [id])
+
+  useEffect(() => {
+    if (!user) {
+      setWatching(false)
+      return
+    }
+    api.watchlist()
+      .then((w) => {
+        setWatching(Boolean((w.items || []).find((x) => String(x.repo_id) === String(id))))
+      })
+      .catch(() => setWatching(false))
+  }, [user, id])
+
+  usePageTitle(data?.repo?.full_name || 'Repository')
+
   if (loading) return <LoadingState label="Loading repository…" />
-  if (error) return <ErrorState message={error} />
+  if (error && !data?.repo) return <ErrorState message={error} />
   if (!data?.repo) return <EmptyState title="Repository not found" />
 
-  const { repo, languages, contributors, issues, pull_requests: pulls, report } = data
+  const { repo, languages, contributors, issues, pull_requests: pulls, report, sample_window: sampleWindow } = data
   const [owner, name] = (repo.full_name || '/').split('/')
+  const sampleLabel = (() => {
+    if (!sampleWindow?.activity_days) return ''
+    const since = formatOldest(sampleWindow.oldest_activity)
+    const caps = [sampleWindow.commit_cap, sampleWindow.issue_cap, sampleWindow.pr_cap].filter((n) => n != null)
+    const capN = caps.length ? Math.max(...caps) : null
+    if (since && capN != null) {
+      return `Sampled public activity since ${since}, capped at ${capN}`
+    }
+    if (capN != null) {
+      return `Sampled public activity (last ${sampleWindow.activity_days}d), capped at ${capN}`
+    }
+    return `Sampled public activity (last ${sampleWindow.activity_days}d)`
+  })()
 
   async function syncForkFully(forkId) {
-    const token = sessionStorage.getItem('osint_admin_token') || 'changeme'
+    if (!isAdmin) {
+      setError('Admin sign-in required to sync')
+      return
+    }
     setSyncingFork(forkId)
     setError('')
     try {
-      await api.syncRepo(forkId, token)
+      await api.syncRepo(forkId)
     } catch (e) {
       setError(e.message || String(e))
     } finally {
       setSyncingFork(null)
+    }
+  }
+
+  async function toggleWatch() {
+    if (!user) {
+      window.location.href = loginUrl
+      return
+    }
+    setWatchBusy(true)
+    try {
+      if (watching) {
+        await api.removeWatch(Number(id))
+        setWatching(false)
+      } else {
+        await api.addWatch(Number(id))
+        setWatching(true)
+      }
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setWatchBusy(false)
+    }
+  }
+
+  async function copyBadge() {
+    const url = api.badgeUrl(owner, name)
+    const md = `![health](${url})`
+    try {
+      await navigator.clipboard.writeText(md)
+      setBadgeCopied(true)
+      setTimeout(() => setBadgeCopied(false), 2000)
+    } catch {
+      setError('Could not copy badge markdown')
     }
   }
 
@@ -110,7 +226,19 @@ export default function RepoDetail() {
         </div>
         <div className="repo-page-actions">
           <Button leadingVisual={StarIcon} size="small">
-            Star <CounterLabel>{compactNumber(repo.stars)}</CounterLabel>
+            Stars <CounterLabel>{compactNumber(repo.stars)}</CounterLabel>
+          </Button>
+          <Button
+            leadingVisual={EyeIcon}
+            size="small"
+            variant={watching ? 'primary' : 'default'}
+            disabled={watchBusy}
+            onClick={toggleWatch}
+          >
+            {watching ? 'Watching' : 'Watch'}
+          </Button>
+          <Button size="small" onClick={copyBadge}>
+            {badgeCopied ? 'Copied!' : 'Copy badge'}
           </Button>
           {repo.html_url && (
             <Button
@@ -127,6 +255,7 @@ export default function RepoDetail() {
           )}
         </div>
       </div>
+      {error && <ErrorState message={error} />}
 
       {repo.description && <Text as="p" className="repo-desc">{repo.description}</Text>}
 
@@ -155,33 +284,82 @@ export default function RepoDetail() {
       <div className="repo-body">
         <div className="repo-main">
           {tab === 'overview' && (
-            <section className="panel">
-              <Heading as="h2" className="h3">About this project</Heading>
-              <div className="stat-grid">
-                <div className="stat-tile">
-                  <span className="muted">Commits (90d)</span>
-                  <strong>{repo.commits_90d}</strong>
+            <>
+              <section className="panel">
+                <Heading as="h2" className="h3">About this project</Heading>
+                <div className="stat-grid">
+                  <div className="stat-tile">
+                    <span className="muted">Commits (90d)</span>
+                    <strong>{repo.commits_90d}</strong>
+                  </div>
+                  <div className="stat-tile">
+                    <span className="muted">Contributors</span>
+                    <strong>{repo.unique_contributors}</strong>
+                  </div>
+                  <div className="stat-tile">
+                    <span className="muted">Issue close rate</span>
+                    <strong>{repo.issue_close_rate ?? '—'}</strong>
+                  </div>
+                  <div className="stat-tile">
+                    <span className="muted">PR merge rate</span>
+                    <strong>{repo.pr_merge_rate ?? '—'}</strong>
+                  </div>
                 </div>
-                <div className="stat-tile">
-                  <span className="muted">Contributors</span>
-                  <strong>{repo.unique_contributors}</strong>
+                <HealthMeter score={repo.health_score} />
+                <Text as="p" className="muted" style={{ marginTop: '1rem' }}>
+                  Median days to close issues: {Number(repo.median_days_to_close || 0).toFixed(1)} ·
+                  Days since push: {Number(repo.days_since_push || 0).toFixed(0)} ·
+                  Health rank #{repo.health_rank}
+                </Text>
+                {sampleLabel && (
+                  <Text as="p" className="muted" size="small" style={{ marginTop: '0.5rem' }}>
+                    {sampleLabel}
+                    {sampleWindow?.last_full_sync_at
+                      ? ` · synced ${relativeTime(sampleWindow.last_full_sync_at) || sampleWindow.last_full_sync_at}`
+                      : ''}
+                    . Stars and open-issue totals are GitHub’s counts; commit/issue/PR charts use this sample.
+                  </Text>
+                )}
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Activity (last 12 months)</Heading>
+                <MonthlyActivityChart monthly={monthly} />
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Status mix</Heading>
+                <div className="repo-chart-grid">
+                  <StatusDoughnut
+                    title="Issues"
+                    labels={['Open', 'Closed']}
+                    values={[
+                      issueFlow.totals?.issues_open ?? repo.open_issues ?? 0,
+                      issueFlow.totals?.issues_closed ?? Math.max(0, (repo.total_issues || 0) - (repo.open_issues || 0)),
+                    ]}
+                    colors={[theme.success, theme.done]}
+                  />
+                  <StatusDoughnut
+                    title="Pull requests"
+                    labels={['Open', 'Merged', 'Closed']}
+                    values={[
+                      issueFlow.totals?.prs_open ?? 0,
+                      issueFlow.totals?.prs_merged ?? 0,
+                      issueFlow.totals?.prs_closed_unmerged ?? 0,
+                    ]}
+                    colors={[theme.success, theme.done, theme.danger]}
+                  />
                 </div>
-                <div className="stat-tile">
-                  <span className="muted">Issue close rate</span>
-                  <strong>{repo.issue_close_rate ?? '—'}</strong>
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Languages & contributors</Heading>
+                <div className="repo-chart-grid">
+                  <LanguageDoughnut languages={languages} />
+                  <TopContributorsChart contributors={contributors} />
                 </div>
-                <div className="stat-tile">
-                  <span className="muted">PR merge rate</span>
-                  <strong>{repo.pr_merge_rate ?? '—'}</strong>
-                </div>
-              </div>
-              <HealthMeter score={repo.health_score} />
-              <Text as="p" className="muted" style={{ marginTop: '1rem' }}>
-                Median days to close issues: {Number(repo.median_days_to_close || 0).toFixed(1)} ·
-                Days since push: {Number(repo.days_since_push || 0).toFixed(0)} ·
-                Health rank #{repo.health_rank}
-              </Text>
-            </section>
+              </section>
+            </>
           )}
 
           {tab === 'issues' && (
@@ -247,69 +425,108 @@ export default function RepoDetail() {
           )}
 
           {tab === 'insights' && (
-            <section className="panel">
-              <Heading as="h2" className="h3">Health insights</Heading>
-              <HealthMeter score={repo.health_score} />
-              {factors && (
-                <div className="factor-list" style={{ marginTop: '1rem' }}>
-                  <Heading as="h3" className="h4">Score factors</Heading>
-                  {[
-                    ['Commit velocity', factors.factor_commit_velocity, factors.factor_commit_velocity_max],
-                    ['Contributors', factors.factor_contributors, factors.factor_contributors_max],
-                    ['Issue resolution', factors.factor_issue_resolution, factors.factor_issue_resolution_max],
-                    ['Time to close', factors.factor_time_to_close, factors.factor_time_to_close_max],
-                    ['PR merge', factors.factor_pr_merge, factors.factor_pr_merge_max],
-                    ['Recency', factors.factor_recency, factors.factor_recency_max],
-                  ].map(([label, value, max]) => (
-                    <div key={label} className="factor-row">
-                      <div className="factor-row-head">
-                        <span>{label}</span>
-                        <span className="muted">{Number(value).toFixed(1)} / {Number(max).toFixed(0)}</span>
-                      </div>
-                      <div className="factor-bar-track">
-                        <div
-                          className="factor-bar-fill"
-                          style={{ width: `${Math.max(0, Math.min(100, (Number(value) / Number(max || 1)) * 100))}%` }}
-                        />
-                      </div>
+            <>
+              <section className="panel">
+                <Heading as="h2" className="h3">Health insights</Heading>
+                <HealthMeter score={repo.health_score} />
+                <div className="repo-chart-grid" style={{ marginTop: '1rem' }}>
+                  <div>
+                    <Heading as="h3" className="h4">Factor radar</Heading>
+                    <HealthFactorRadar factors={factors} />
+                  </div>
+                  {factors && (
+                    <div className="factor-list">
+                      <Heading as="h3" className="h4">Score factors</Heading>
+                      {[
+                        ['Commit velocity', factors.factor_commit_velocity, factors.factor_commit_velocity_max],
+                        ['Contributors', factors.factor_contributors, factors.factor_contributors_max],
+                        ['Issue resolution', factors.factor_issue_resolution, factors.factor_issue_resolution_max],
+                        ['Time to close', factors.factor_time_to_close, factors.factor_time_to_close_max],
+                        ['PR merge', factors.factor_pr_merge, factors.factor_pr_merge_max],
+                        ['Recency', factors.factor_recency, factors.factor_recency_max],
+                      ].map(([label, value, max]) => (
+                        <div key={label} className="factor-row">
+                          <div className="factor-row-head">
+                            <span>{label}</span>
+                            <span className="muted">{Number(value).toFixed(1)} / {Number(max).toFixed(0)}</span>
+                          </div>
+                          <div className="factor-bar-track">
+                            <div
+                              className="factor-bar-fill"
+                              style={{ width: `${Math.max(0, Math.min(100, (Number(value) / Number(max || 1)) * 100))}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                      {Number(factors.factor_archived_penalty) > 0 && (
+                        <Text className="muted">Archived penalty: −{factors.factor_archived_penalty}</Text>
+                      )}
                     </div>
-                  ))}
-                  {Number(factors.factor_archived_penalty) > 0 && (
-                    <Text className="muted">Archived penalty: −{factors.factor_archived_penalty}</Text>
                   )}
                 </div>
-              )}
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Health among indexed repos</Heading>
+                <HealthDistributionChart distribution={healthDist} />
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Commit punch card</Heading>
+                <Text as="p" className="muted">Commits by weekday and hour (UTC)</Text>
+                <CommitHeatmap items={heatmap.items} timezone={heatmap.timezone} />
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">Issue flow</Heading>
+                <FlowChart items={issueFlow.items} mode="issues" />
+              </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">PR flow</Heading>
+                <FlowChart items={issueFlow.items} mode="prs" />
+              </section>
+
               {monthly.length > 0 && (
-                <div style={{ marginTop: '1.25rem' }}>
-                  <Heading as="h3" className="h4">Monthly activity (MoM via LAG)</Heading>
-                  <table className="people-table">
-                    <thead>
-                      <tr>
-                        <th>Month</th>
-                        <th>Commits</th>
-                        <th>Δ</th>
-                        <th>Issues</th>
-                        <th>PRs</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monthly.map((m) => (
-                        <tr key={m.activity_month}>
-                          <td>{m.activity_month}</td>
-                          <td>{m.commit_count}</td>
-                          <td className="muted">{m.commits_mom_delta ?? '—'}</td>
-                          <td>{m.issue_count}</td>
-                          <td>{m.pr_count}</td>
+                <section className="panel">
+                  <details>
+                    <summary>
+                      <Heading as="h2" className="h3" style={{ display: 'inline' }}>
+                        Monthly activity table (MoM via LAG)
+                      </Heading>
+                    </summary>
+                    <table className="people-table" style={{ marginTop: '0.75rem' }}>
+                      <thead>
+                        <tr>
+                          <th>Month</th>
+                          <th>Commits</th>
+                          <th>Δ</th>
+                          <th>Issues</th>
+                          <th>PRs</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {monthly.map((m) => (
+                          <tr key={m.activity_month}>
+                            <td>{m.activity_month}</td>
+                            <td>{m.commit_count}</td>
+                            <td className="muted">{m.commits_mom_delta ?? '—'}</td>
+                            <td>{m.issue_count}</td>
+                            <td>{m.pr_count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                </section>
               )}
-              <Heading as="h3" className="h4" style={{ marginTop: '1.25rem' }}>SQL report</Heading>
-              <Text as="p" className="muted">From <code>fn_generate_repo_report</code></Text>
-              <pre className="report-json">{JSON.stringify(report || {}, null, 2)}</pre>
-            </section>
+
+              <section className="panel">
+                <Heading as="h2" className="h3">SQL report</Heading>
+                <Text as="p" className="muted">From <code>fn_generate_repo_report</code></Text>
+                <pre className="report-json">{JSON.stringify(report || {}, null, 2)}</pre>
+              </section>
+            </>
           )}
 
           {tab === 'ancestry' && (
@@ -375,7 +592,7 @@ export default function RepoDetail() {
                       <TreeView.TrailingVisual>
                         <span className="muted" style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
                           depth {n.depth} · ★ {compactNumber(n.stars)}
-                          {n.sync_depth === 'stub' && n.repo_id !== repo.repo_id && (
+                          {isAdmin && n.sync_depth === 'stub' && n.repo_id !== repo.repo_id && (
                             <Button
                               size="small"
                               leadingVisual={SyncIcon}
